@@ -42,6 +42,7 @@ type SearchResultItem = {
   title: string;
   score: number;
   context: string | null;
+  line: number;   // Absolute line in source markdown
   snippet: string;
 };
 
@@ -242,6 +243,8 @@ async function createMcpServer(store: QMDStore): Promise<McpServer> {
       title: "Query",
       description: `Search the knowledge base using a query document — one or more typed sub-queries combined for best recall.
 
+Each result includes a \`line\` field with the absolute 1-indexed line of the best match in the source markdown. To read more context around a hit, call \`get(file, fromLine = line - 20, maxLines = 80, lineNumbers = true)\`.
+
 ## Query Types
 
 **lex** — BM25 keyword search. Fast, exact, no LLM needed.
@@ -341,13 +344,14 @@ Intent-aware lex (C++ performance, not sports):
         || searches[0]?.query || "";
 
       const filtered: SearchResultItem[] = results.map(r => {
-        const { line, snippet } = extractSnippet(r.bestChunk, primaryQuery, 300, undefined, undefined, intent);
+        const { line, snippet } = extractSnippet(r.body, primaryQuery, 300, r.bestChunkPos, r.bestChunk.length, intent);
         return {
           docid: `#${r.docid}`,
           file: r.displayPath,
           title: r.title,
           score: Math.round(r.score * 100) / 100,
           context: r.context,
+          line,
           snippet: addLineNumbers(snippet, line),
         };
       });
@@ -702,13 +706,14 @@ export async function startMcpHttpServer(
           || params.searches[0]?.query || "";
 
         const formatted = results.map(r => {
-          const { line, snippet } = extractSnippet(r.bestChunk, primaryQuery, 300);
+          const { line, snippet } = extractSnippet(r.body, primaryQuery, 300, r.bestChunkPos, r.bestChunk.length, params.intent);
           return {
             docid: `#${r.docid}`,
             file: r.displayPath,
             title: r.title,
             score: Math.round(r.score * 100) / 100,
             context: r.context,
+            line,
             snippet: addLineNumbers(snippet, line),
           };
         });

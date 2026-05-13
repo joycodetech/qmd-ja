@@ -4,6 +4,17 @@
 
 ### Fixes
 
+- Snippet line numbers: `qmd_query` (MCP), HTTP `/query`, and `qmd query`
+  (CLI JSON output and snippet headers) now return absolute source-file
+  line numbers instead of chunk-local ones, so the `line` field can be
+  passed back to `qmd_get` as `fromLine` without a separate lookup.
+  Snippet selection remains scoped to the best matching chunk
+  (preserves #149).
+- CLI: `qmd query --full` now emits the full document body in all output
+  formats (json, csv, md, xml), restoring the documented behavior of the
+  flag. Previously it returned only the best matching chunk (~3.6KB max
+  per result). Output payload for `--full` queries is now proportional
+  to total document size.
 - Embedding: `qmd embed -c <collection>` now scopes pending-doc selection
   to the requested collection instead of embedding global pending work.
   Scoped `--force` clears only collection-owned vectors, preserves shared

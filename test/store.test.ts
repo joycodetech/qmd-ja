@@ -2001,6 +2001,33 @@ describe("Snippet Extraction", () => {
     expect(line).toBe(51); // "Target keyword" is line 51
     expect(linesBefore).toBeGreaterThan(40); // Many lines before
   });
+
+  test("extractSnippet anchors on chunkPos when lexical scoring finds no match", () => {
+    // The snippet tokenizer does not strip FTS5 syntax, so a quoted-phrase query
+    // tokenises into terms with embedded quotes that never appear in body text.
+    // bestScore stays at 0 even though the reranker correctly identified a chunk;
+    // the fallback should anchor on chunkPos rather than defaulting to line 1.
+    const padLine = "Lorem ipsum dolor sit amet\n";
+    const padding = padLine.repeat(100);
+    const body = padding + "chunk content here\nmore chunk content\n" + padding;
+    const chunkPos = padding.length;
+
+    const { line } = extractSnippet(body, '"unrelated quoted phrase"', 200, chunkPos);
+
+    expect(line).toBeGreaterThan(50);
+    expect(line).toBeLessThan(110);
+  });
+
+  test("extractSnippet with chunkPos=0 falls back to full-body scan when chunk has no match", () => {
+    // chunkPos=0 may be the chunk selector's bestIdx=0 default rather than a real
+    // first-chunk hit, so the fallback must consider matches outside chunk 0.
+    const padding = "Lorem ipsum dolor sit amet\n".repeat(200);
+    const body = padding + "TARGET_KEYWORD line content\ntail line\n";
+
+    const { line } = extractSnippet(body, "TARGET_KEYWORD", 200, 0);
+
+    expect(line).toBe(201);
+  });
 });
 
 // =============================================================================

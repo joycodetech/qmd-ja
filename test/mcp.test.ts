@@ -913,6 +913,22 @@ describe.skipIf(!!process.env.CI)("MCP HTTP Transport", () => {
     initTestDatabase(db);
     seedTestData(db);
 
+    // 300 pad lines (37 chars each = 11100 chars) puts the marker past the
+    // first chunk boundary at CHUNK_SIZE_CHARS = 3600.
+    {
+      const padLine = "Pad line for chunk boundary coverage\n";
+      const absLineFixtureBody =
+        padLine.repeat(300) +
+        "UNIQUE_KEYWORD_XYZ marker\n" +
+        padLine.repeat(20);
+      const fixtureHash = "hash-abslines";
+      const now = new Date().toISOString();
+      db.prepare(`INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)`)
+        .run(fixtureHash, absLineFixtureBody, now);
+      db.prepare(`INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES ('docs', ?, ?, ?, ?, ?, 1)`)
+        .run("absolute-line-fixture.md", "Absolute Line Fixture", fixtureHash, now, now);
+    }
+
     // Sync config into SQLite
     const httpTestConfig: CollectionConfig = {
       collections: {
@@ -1073,5 +1089,30 @@ describe.skipIf(!!process.env.CI)("MCP HTTP Transport", () => {
     expect(status).toBe(200);
     expect(json.result).toBeDefined();
     expect(json.result.content.length).toBeGreaterThan(0);
+  });
+
+  test("POST /mcp tools/call query returns absolute source-file line numbers, not chunk-local", async () => {
+    await mcpRequest({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+    });
+
+    const { status, json } = await mcpRequest({
+      jsonrpc: "2.0", id: 5, method: "tools/call",
+      params: {
+        name: "query",
+        arguments: {
+          searches: [{ type: "lex", query: "UNIQUE_KEYWORD_XYZ" }],
+          rerank: false,
+        },
+      },
+    });
+    expect(status).toBe(200);
+    const results = json.result.structuredContent.results;
+    expect(results.length).toBeGreaterThan(0);
+    const hit = results.find((r: any) => r.file === "docs/absolute-line-fixture.md");
+    expect(hit).toBeDefined();
+    expect(hit.line).toBe(301);
+    expect(hit.snippet).toMatch(/^\d+: @@ -3\d\d,/);
   });
 });

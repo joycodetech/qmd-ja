@@ -507,6 +507,16 @@ describe("CLI Search Command", () => {
     // Error message goes to stderr
     expect(stderr).toContain("Usage:");
   });
+
+  test("--json --full includes line field for round-tripping to qmd get", async () => {
+    const { stdout, exitCode } = await runQmd(["search", "meeting", "--json", "--full", "-n", "1"]);
+    expect(exitCode).toBe(0);
+    const results = JSON.parse(stdout);
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].line).toBeTypeOf("number");
+    expect(results[0].line).toBeGreaterThan(0);
+    expect(results[0].body).toBeTypeOf("string");
+  });
 });
 
 describe("CLI Get Command", () => {

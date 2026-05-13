@@ -4023,7 +4023,7 @@ export function extractSnippet(body: string, query: string, maxLen = 500, chunkP
   let searchBody = body;
   let lineOffset = 0;
 
-  if (chunkPos && chunkPos > 0) {
+  if (chunkPos !== undefined && chunkPos >= 0) {
     // Search within the chunk region, with some padding for context
     // Use provided chunkLen or fall back to max chunk size (covers variable-length chunks)
     const searchLen = chunkLen || CHUNK_SIZE_CHARS;
@@ -4053,6 +4053,23 @@ export function extractSnippet(body: string, query: string, maxLen = 500, chunkP
       bestScore = score;
       bestLine = i;
     }
+  }
+
+  if (chunkPos !== undefined && chunkPos >= 0 && bestScore <= 0) {
+    if (chunkPos === 0) {
+      // chunkPos=0 may be the chunk selector's initialization default for queries
+      // where lexical chunk scoring found no winner (e.g. tokens filtered to empty
+      // by the length>2 guard). Retry with full body so the real match isn't missed.
+      return extractSnippet(body, query, maxLen, undefined, undefined, intent);
+    }
+    // For chunkPos > 0 the reranker actively picked this chunk. Tokens failing to
+    // match literally is most likely a tokenizer limitation (quoted phrases, FTS5
+    // syntax, HYDE passages, semantic hits), so anchor on the chunk start rather
+    // than disregarding the reranker's pick.
+    const contextStart = Math.max(0, chunkPos - 100);
+    bestLine = chunkPos > contextStart
+      ? searchBody.slice(0, chunkPos - contextStart).split('\n').length - 1
+      : 0;
   }
 
   const start = Math.max(0, bestLine - 1);
