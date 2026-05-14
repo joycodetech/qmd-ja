@@ -243,7 +243,7 @@ async function createMcpServer(store: QMDStore): Promise<McpServer> {
       title: "Query",
       description: `Search the knowledge base using a query document — one or more typed sub-queries combined for best recall.
 
-Each result includes a \`line\` field with the absolute 1-indexed line of the best match in the source markdown. To read more context around a hit, call \`get(file, fromLine = line - 20, maxLines = 80, lineNumbers = true)\`.
+Each result includes a \`line\` field with the absolute 1-indexed line of the best match in the source markdown. To read more context around a hit, call \`get(file, fromLine = max(1, line - 20), maxLines = 80, lineNumbers = true)\`.
 
 ## Query Types
 
@@ -389,6 +389,7 @@ Intent-aware lex (C++ performance, not sports):
         parsedFromLine = parseInt(colonMatch[1], 10);
         lookup = lookup.slice(0, -colonMatch[0].length);
       }
+      if (parsedFromLine !== undefined) parsedFromLine = Math.max(1, parsedFromLine);
 
       const result = await store.get(lookup, { includeBody: false });
 

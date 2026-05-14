@@ -1713,6 +1713,21 @@ describe("Document Retrieval", () => {
       expect(body).toBeNull();
       await cleanupTestDb(store);
     });
+
+    test("getDocumentBody clamps negative fromLine to top of document", async () => {
+      const store = await createTestStore();
+      const collectionName = await createTestCollection({ pwd: "/path" });
+      await insertTestDocument(store.db, collectionName, {
+        name: "mydoc",
+        displayPath: "mydoc.md",
+        body: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
+      });
+
+      const body = store.getDocumentBody({ filepath: "/path/mydoc.md" }, -19, 80);
+      expect(body).toBe("Line 1\nLine 2\nLine 3\nLine 4\nLine 5");
+
+      await cleanupTestDb(store);
+    });
   });
 
   describe("findDocuments (multi-get)", () => {

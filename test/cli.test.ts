@@ -542,6 +542,13 @@ describe("CLI Get Command", () => {
     // Should indicate file not found
     expect(exitCode).toBe(1);
   });
+
+  test("clamps negative --from to top of file (no silent tail content)", async () => {
+    const baseline = await runQmd(["get", "README.md"]);
+    const negative = await runQmd(["get", "README.md", "--from", "-19"]);
+    expect(negative.exitCode).toBe(0);
+    expect(negative.stdout).toBe(baseline.stdout);
+  });
 });
 
 describe("CLI Multi-Get Command", () => {

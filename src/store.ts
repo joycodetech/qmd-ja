@@ -3800,7 +3800,7 @@ export function getDocumentBody(db: Database, doc: DocumentResult | { filepath: 
   let body = row.body;
   if (fromLine !== undefined || maxLines !== undefined) {
     const lines = body.split('\n');
-    const start = (fromLine || 1) - 1;
+    const start = Math.max(0, (fromLine || 1) - 1);
     const end = maxLines !== undefined ? start + maxLines : lines.length;
     body = lines.slice(start, end).join('\n');
   }
