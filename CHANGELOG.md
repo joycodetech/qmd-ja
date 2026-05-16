@@ -45,6 +45,9 @@
 - Packaging: install AST grammar WASM packages as required dependencies so
   Bun global installs include TypeScript/TSX/JavaScript grammars, and add a
   `smoke:package-grammars` verification command. #595
+- Launcher: add wrapper smoke coverage for scoped package, npm/npx,
+  Homebrew/Linuxbrew, Bun global symlink layouts, and `$BUN_INSTALL`
+  false-positive runtime selection regressions. #351 #353 #354 #356 #358 #359
 
 ## [2.1.0] - 2026-04-05
 
