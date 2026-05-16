@@ -16,6 +16,7 @@
   flag. Previously it returned only the best matching chunk (~3.6KB max
   per result). Output payload for `--full` queries is now proportional
   to total document size.
+- macOS Metal: `qmd query --json` now flushes successful JSON output and uses a safe immediate-exit path on Darwin to avoid ggml Metal finalizer aborts; other commands still dispose LLM contexts/models before the llama runtime. #368
 - Embedding: `qmd embed -c <collection>` now scopes pending-doc selection
   to the requested collection instead of embedding global pending work.
   Scoped `--force` clears only collection-owned vectors, preserves shared

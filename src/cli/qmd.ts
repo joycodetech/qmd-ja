@@ -207,6 +207,76 @@ const cursor = {
   show() { process.stderr.write('\x1b[?25h'); },
 };
 
+type CliLifecycleWritable = {
+  write(chunk: string | Uint8Array, callback?: (error?: Error | null) => void): boolean;
+};
+
+type FinishSuccessfulCliCommandOptions = {
+  command: string;
+  format?: OutputFormat;
+  cleanup?: () => Promise<void>;
+  exit?: (code: number) => void;
+  immediateExit?: (code: number) => void;
+  stdout?: CliLifecycleWritable;
+  stderr?: CliLifecycleWritable;
+  platform?: NodeJS.Platform;
+};
+
+async function flushWritable(stream: CliLifecycleWritable): Promise<void> {
+  await new Promise<void>((resolve) => {
+    stream.write("", () => resolve());
+  });
+}
+
+function shouldBypassNativeCleanup(options: FinishSuccessfulCliCommandOptions): boolean {
+  return (
+    (options.platform ?? process.platform) === "darwin" &&
+    options.command === "query" &&
+    options.format === "json" &&
+    process.env.QMD_DISABLE_DARWIN_QUERY_JSON_SAFE_EXIT !== "1"
+  );
+}
+
+function immediateProcessExit(code: number): void {
+  const processWithReallyExit = process as NodeJS.Process & { reallyExit?: (code?: number) => void };
+  if (typeof processWithReallyExit.reallyExit === "function") {
+    processWithReallyExit.reallyExit(code);
+    return;
+  }
+  process.exit(code);
+}
+
+/**
+ * Finish a successful CLI command after output has been flushed. On macOS JSON
+ * query runs, skip normal native teardown and use Node/Bun's immediate exit path:
+ * ggml Metal can abort from C++ finalizers after valid JSON has already been
+ * produced (#368). This wrapper is only reached after the command completed, so
+ * real query failures still exit through the normal error path before this runs.
+ */
+export async function finishSuccessfulCliCommand(options: FinishSuccessfulCliCommandOptions): Promise<void> {
+  const stderr = options.stderr ?? process.stderr;
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const immediateExit = options.immediateExit ?? immediateProcessExit;
+
+  await flushWritable(options.stdout ?? process.stdout);
+
+  if (shouldBypassNativeCleanup(options)) {
+    await flushWritable(stderr);
+    immediateExit(0);
+    return;
+  }
+
+  try {
+    await (options.cleanup ?? disposeDefaultLlamaCpp)();
+  } catch (error) {
+    stderr.write(
+      `QMD Warning: cleanup after successful output failed (${error instanceof Error ? error.message : String(error)}); exiting 0 because command output completed.\n`
+    );
+  }
+  await flushWritable(stderr);
+  exit(0);
+}
+
 // Ensure cursor is restored on exit
 process.on('SIGINT', () => { cursor.show(); process.exit(130); });
 process.on('SIGTERM', () => { cursor.show(); process.exit(143); });
@@ -3421,8 +3491,10 @@ if (isMain) {
   }
 
   if (cli.command !== "mcp") {
-    await disposeDefaultLlamaCpp();
-    process.exit(0);
+    await finishSuccessfulCliCommand({
+      command: cli.command,
+      format: cli.opts.format,
+    });
   }
 
 } // end if (main module)

@@ -540,6 +540,23 @@ export function resolveLlamaGpuMode(
   return "auto";
 }
 
+async function disposeWithTimeout(resourceName: string, dispose: () => Promise<void>, timeoutMs = 1000): Promise<void> {
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    setTimeout(() => resolve("timeout"), timeoutMs).unref();
+  });
+
+  try {
+    const result = await Promise.race([dispose(), timeoutPromise]);
+    if (result === "timeout") {
+      process.stderr.write(`QMD Warning: timed out disposing ${resourceName}; continuing shutdown.\n`);
+    }
+  } catch (error) {
+    process.stderr.write(
+      `QMD Warning: failed to dispose ${resourceName} (${error instanceof Error ? error.message : String(error)}); continuing shutdown.\n`
+    );
+  }
+}
+
 function resolveExpandContextSize(configValue?: number): number {
   if (configValue !== undefined) {
     if (!Number.isInteger(configValue) || configValue <= 0) {
@@ -1465,22 +1482,37 @@ export class LlamaCpp implements LLM {
       this.inactivityTimer = null;
     }
 
-    // Disposing llama cascades to models and contexts automatically
-    // See: https://node-llama-cpp.withcat.ai/guide/objects-lifecycle
-    // Note: llama.dispose() can hang indefinitely, so we use a timeout
-    if (this.llama) {
-      const disposePromise = this.llama.dispose();
-      const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 1000));
-      await Promise.race([disposePromise, timeoutPromise]);
+    // Explicitly dispose in dependency order: contexts first, then models, then llama.
+    // Relying only on llama.dispose() leaves Metal resource sets alive until process
+    // finalization on Apple Silicon, where ggml_metal_device_free can abort after
+    // otherwise-successful CLI output (#368).
+    for (const ctx of this.embedContexts) {
+      await disposeWithTimeout("embedding context", () => ctx.dispose());
+    }
+    this.embedContexts = [];
+
+    for (const ctx of this.rerankContexts) {
+      await disposeWithTimeout("rerank context", () => ctx.dispose());
+    }
+    this.rerankContexts = [];
+
+    if (this.embedModel) {
+      await disposeWithTimeout("embedding model", () => this.embedModel!.dispose());
+      this.embedModel = null;
+    }
+    if (this.generateModel) {
+      await disposeWithTimeout("generation model", () => this.generateModel!.dispose());
+      this.generateModel = null;
+    }
+    if (this.rerankModel) {
+      await disposeWithTimeout("rerank model", () => this.rerankModel!.dispose());
+      this.rerankModel = null;
     }
 
-    // Clear references
-    this.embedContexts = [];
-    this.rerankContexts = [];
-    this.embedModel = null;
-    this.generateModel = null;
-    this.rerankModel = null;
-    this.llama = null;
+    if (this.llama) {
+      await disposeWithTimeout("llama runtime", () => this.llama!.dispose());
+      this.llama = null;
+    }
 
     // Clear any in-flight load/create promises
     this.embedModelLoadPromise = null;
