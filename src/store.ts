@@ -25,6 +25,9 @@ import {
   formatQueryForEmbedding,
   formatDocForEmbedding,
   withLLMSessionForLlm,
+  DEFAULT_EMBED_MODEL_URI,
+  DEFAULT_RERANK_MODEL_URI,
+  DEFAULT_GENERATE_MODEL_URI,
   type RerankDocument,
   type ILLMSession,
 } from "./llm.js";
@@ -39,9 +42,9 @@ import type {
 // Configuration
 // =============================================================================
 
-export const DEFAULT_EMBED_MODEL = "embeddinggemma";
-export const DEFAULT_RERANK_MODEL = "ExpedientFalcon/qwen3-reranker:0.6b-q8_0";
-export const DEFAULT_QUERY_MODEL = "Qwen/Qwen3-1.7B";
+export const DEFAULT_EMBED_MODEL = DEFAULT_EMBED_MODEL_URI;
+export const DEFAULT_RERANK_MODEL = DEFAULT_RERANK_MODEL_URI;
+export const DEFAULT_QUERY_MODEL = DEFAULT_GENERATE_MODEL_URI;
 export const DEFAULT_GLOB = "**/*.md";
 export const DEFAULT_MULTI_GET_MAX_BYTES = 10 * 1024; // 10KB
 export const DEFAULT_EMBED_MAX_DOCS_PER_BATCH = 64;
@@ -1749,8 +1752,8 @@ export function createStore(dbPath?: string): Store {
     searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
 
     // Query expansion & reranking
-    expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model, db, intent, store.llm),
-    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => rerank(query, documents, model, db, intent, store.llm),
+    expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model ?? store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL, db, intent, store.llm),
+    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => rerank(query, documents, model ?? store.llm?.rerankModelName ?? DEFAULT_RERANK_MODEL, db, intent, store.llm),
 
     // Document retrieval
     findDocument: (filename: string, options?: { includeBody?: boolean }) => findDocument(db, filename, options),

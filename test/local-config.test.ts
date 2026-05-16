@@ -56,7 +56,7 @@ describe("local .qmd project config", () => {
     mkdirSync(join(root, ".qmd"), { recursive: true });
     mkdirSync(join(root, "docs"), { recursive: true });
     writeFileSync(join(root, "docs", "a.md"), "# A\n\nLocal test document.\n");
-    writeFileSync(join(root, ".qmd", "index.yaml"), `collections:\n  docs:\n    path: ${JSON.stringify(join(root, "docs"))}\n    pattern: "**/*.md"\n    context:\n      /: Local test docs\n`);
+    writeFileSync(join(root, ".qmd", "index.yaml"), `collections:\n  docs:\n    path: ${JSON.stringify(join(root, "docs"))}\n    pattern: "**/*.md"\n    context:\n      /: Local test docs\nmodels:\n  embed: local-embed-model\n  rerank: local-rerank-model\n  generate: local-generate-model\n`);
 
     const home = join(root, "home");
     const tsxBin = join(process.cwd(), "node_modules", ".bin", "tsx");
@@ -69,12 +69,19 @@ describe("local .qmd project config", () => {
         HOME: home,
         XDG_CONFIG_HOME: join(home, ".config"),
         XDG_CACHE_HOME: join(home, ".cache"),
+        QMD_EMBED_MODEL: "env-embed-model",
+        QMD_RERANK_MODEL: "env-rerank-model",
+        QMD_GENERATE_MODEL: "env-generate-model",
       },
     });
 
     const localIndex = join(root, ".qmd", "index.sqlite");
     expect(output).toContain(`Index: ${realpathSync(localIndex)}`);
     expect(output).toContain("docs (qmd://docs/)");
+    expect(output).toContain("Embedding:   local-embed-model");
+    expect(output).toContain("Reranking:   local-rerank-model");
+    expect(output).toContain("Generation:  local-generate-model");
+    expect(output).not.toContain("env-embed-model");
     expect(existsSync(localIndex)).toBe(true);
     expect(existsSync(join(home, ".cache", "qmd", "index.sqlite"))).toBe(false);
   });
