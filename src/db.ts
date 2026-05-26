@@ -63,9 +63,18 @@ if (isBun) {
 
 /**
  * Open a SQLite database. Works with both bun:sqlite and better-sqlite3.
+ *
+ * `bun:sqlite` and `better-sqlite3` both default `busy_timeout` to 0, so
+ * concurrent writers throw `SQLITE_BUSY` instead of waiting. WAL improves
+ * read-while-write concurrency but does not serialise writers. Setting the
+ * timeout at connection open makes parallel processes (e.g. `qmd query`
+ * fan-out) wait for the write lock through `initializeDatabase`'s DDL
+ * instead of racing it. See https://bun.sh/docs/api/sqlite#busy-timeout.
  */
 export function openDatabase(path: string): Database {
-  return new _Database(path) as Database;
+  const db = new _Database(path) as Database;
+  db.exec("PRAGMA busy_timeout = 5000");
+  return db;
 }
 
 /**

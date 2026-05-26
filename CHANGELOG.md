@@ -24,6 +24,15 @@
 - The embed session `maxDuration` is now env-configurable via
   `QMD_EMBED_MAX_DURATION_MS` (default: 30 min). This prevents large-corpus
   embeddings from being aborted by the hardcoded 30-minute ceiling (#673).
+- `qmd query` and other commands no longer fail with
+  `SQLiteError: database is locked` when multiple processes run against the
+  same index in parallel (e.g. an agent fanning out searches). `openDatabase`
+  now sets `PRAGMA busy_timeout = 5000` on every connection, so a writer that
+  loses the race waits up to 5s for the lock instead of throwing immediately.
+  WAL handles read/write concurrency but does not serialise concurrent
+  writers, and `bun:sqlite` and `better-sqlite3` both default the timeout to
+  0, so the loser previously failed on the first DDL statement in
+  `initializeDatabase`.
 
 ## [2.5.3] - 2026-05-28
 
