@@ -16,6 +16,8 @@ import type { Database } from "./db.js";
 import picomatch from "picomatch";
 import { createHash } from "crypto";
 import { readFileSync, realpathSync, statSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname } from "node:path";
 // Note: node:path resolve is not imported — we export our own cross-platform resolve()
 import fastGlob from "fast-glob";
 import { qmdHomedir } from "./paths.js";
@@ -753,15 +755,55 @@ let _sqliteVecAvailable: boolean | null = null;
 
 const CJK_CHAR_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 const CJK_RUN_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
-const FTS_CJK_NORMALIZED_VERSION = "1";
+const FTS_CJK_NORMALIZED_VERSION = "2"; // bumped: kuromoji morphological tokenization
+
+// --- Kuromoji Japanese morphological analyzer (lazy singleton) ---
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _kuromojiTokenizer: any = null;
+let _kuromojiInitPromise: Promise<any> | null = null;
+
+/**
+ * Pre-initialize the kuromoji Japanese morphological analyzer.
+ * Call this before indexing or search operations involving CJK text.
+ * normalizeCjkForFTS() falls back to unigram mode if not yet initialized.
+ */
+export async function initializeKuromojiTokenizer(): Promise<void> {
+  if (_kuromojiTokenizer) return;
+  if (!_kuromojiInitPromise) {
+    _kuromojiInitPromise = (async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kuromoji = ((await import("kuromoji")) as any).default;
+      const req = createRequire(import.meta.url);
+      const dicPath = dirname(dirname(req.resolve("kuromoji"))) + "/dict";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return new Promise<any>((resolve, reject) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        kuromoji.builder({ dicPath }).build((err: Error | null, tokenizer: any) => {
+          if (err) reject(err);
+          else resolve(tokenizer);
+        });
+      });
+    })();
+  }
+  _kuromojiTokenizer = await _kuromojiInitPromise;
+}
 
 /**
  * FTS5's unicode61 tokenizer does not segment CJK text into searchable words.
- * Normalize CJK runs by spacing every character so exact CJK queries can be
- * translated into phrase queries while Latin text keeps the default tokenizer.
+ * When kuromoji is initialized (via initializeKuromojiTokenizer()), uses morphological
+ * analysis for accurate Japanese word-boundary segmentation.
+ * Falls back to character-level unigram spacing if kuromoji is not yet ready.
  */
 export function normalizeCjkForFTS(text: string): string {
-  return text.replace(CJK_RUN_PATTERN, run => ` ${Array.from(run).join(' ')} `);
+  if (_kuromojiTokenizer) {
+    return text.replace(CJK_RUN_PATTERN, run => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tokens: Array<{ surface_form: string }> = _kuromojiTokenizer.tokenize(run);
+      return " " + tokens.map((t: { surface_form: string }) => t.surface_form).join(" ") + " ";
+    });
+  }
+  // Fallback: original character-level unigram
+  return text.replace(CJK_RUN_PATTERN, run => ` ${Array.from(run).join(" ")} `);
 }
 
 function containsCjk(text: string): boolean {

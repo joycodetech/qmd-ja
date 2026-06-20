@@ -75,6 +75,7 @@ import {
   createStore,
   getDefaultDbPath,
   reindexCollection,
+  initializeKuromojiTokenizer,
   generateEmbeddings,
   maybeAdoptLegacyEmbeddingFingerprint,
   syncConfigToDb,
@@ -658,6 +659,7 @@ async function showStatus(): Promise<void> {
 }
 
 async function updateCollections(): Promise<void> {
+  await initializeKuromojiTokenizer(); // kuromoji: morphological analysis for CJK FTS
   const db = getDb();
   const storeInstance = getStore();
   // Collections are defined in YAML; no duplicate cleanup needed.
