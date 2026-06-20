@@ -1,3 +1,29 @@
+## 🇯🇵 qmd-ja — Japanese-enhanced fork of qmd
+
+> **qmd-ja** is a fork of [tobi/qmd](https://github.com/tobi/qmd) (MIT) with accurate Japanese morphological analysis for BM25 full-text search.
+
+### What's different from upstream
+
+| | tobi/qmd (upstream) | joycodetech/qmd-ja |
+|---|---|---|
+| CJK tokenizer | Unigram (character-level) | **Vaporetto WASM** (morphological) |
+| `ナレッジベース` → FTS | `ナレッジベ ー ス` ❌ | `ナレッジベース` ✅ |
+| `プロンプトコンパイラ` → FTS | `プ ロ ン プ ト...` (17 tokens) | `プロンプトコンパイラ` (1 token) ✅ |
+| Init time | 0 ms | 16 ms (one-time) |
+| Tokenize speed | 3 µs/query | 5 µs/query |
+| `ー` in CJK_RUN_PATTERN | Missing (bug) | Fixed ✅ |
+
+### Installation
+
+```bash
+npm install -g @joycodetech/qmd-ja
+```
+
+> All other features, commands, and MCP integration are identical to [tobi/qmd](https://github.com/tobi/qmd).
+> See the original documentation below ↓
+
+---
+
 # QMD - Query Markup Documents
 
 An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.

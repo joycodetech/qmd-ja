@@ -1,7 +1,7 @@
 {
-  "name": "@tobilu/qmd",
+  "name": "@joycodetech/qmd-ja",
   "version": "2.5.3",
-  "description": "Query Markup Documents - On-device hybrid search for markdown files with BM25, vector search, and LLM reranking",
+  "description": "Japanese-enhanced fork of qmd — On-device hybrid search with Vaporetto WASM morphological tokenizer for accurate Japanese BM25 full-text search",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -49,11 +49,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tobi/qmd.git"
+    "url": "git+https://github.com/joycodetech/qmd-ja.git"
   },
-  "homepage": "https://github.com/tobi/qmd#readme",
+  "homepage": "https://github.com/joycodetech/qmd-ja#readme",
   "bugs": {
-    "url": "https://github.com/tobi/qmd/issues"
+    "url": "https://github.com/joycodetech/qmd-ja/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -119,6 +119,6 @@
     "local-ai",
     "llm"
   ],
-  "author": "Tobi Lutke <tobi@lutke.com>",
+  "author": "Koz Oda <oss@joycodetech.jp>",
   "license": "MIT"
 }
