@@ -4452,6 +4452,7 @@ if (isMain) {
         console.error("Usage: qmd search [options] <query>");
         process.exit(1);
       }
+      await initializeKuromojiTokenizer(); // kuromoji: normalize CJK query
       search(cli.query, cli.opts);
       break;
 
@@ -4474,6 +4475,7 @@ if (isMain) {
         console.error("Usage: qmd query [options] <query>");
         process.exit(1);
       }
+      await initializeKuromojiTokenizer(); // kuromoji: normalize CJK query
       await querySearch(cli.query, cli.opts);
       break;
 
