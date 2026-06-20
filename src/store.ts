@@ -15,9 +15,10 @@ import { openDatabase, loadSqliteVec } from "./db.js";
 import type { Database } from "./db.js";
 import picomatch from "picomatch";
 import { createHash } from "crypto";
-import { readFileSync, realpathSync, statSync, mkdirSync } from "node:fs";
+import { readFileSync, realpathSync, statSync, mkdirSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, join as pathJoin } from "node:path";
+import { fileURLToPath } from "node:url";
 // Note: node:path resolve is not imported — we export our own cross-platform resolve()
 import fastGlob from "fast-glob";
 import { qmdHomedir } from "./paths.js";
@@ -754,52 +755,73 @@ export function verifySqliteVecLoaded(db: Database): void {
 let _sqliteVecAvailable: boolean | null = null;
 
 const CJK_CHAR_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-const CJK_RUN_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
-const FTS_CJK_NORMALIZED_VERSION = "2"; // bumped: kuromoji morphological tokenization
+// CJK_RUN_PATTERN also includes Katakana-extension characters (U+30FB middle dot,
+// U+30FC prolonged sound mark "ー") which belong to Script=Common but are integral
+// parts of katakana words (e.g. "ナレッジベース").  Without these, the regex splits
+// on "ー" and vaporetto receives broken sub-strings like "ナレッジベ" and "ス".
+const CJK_RUN_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}・ー]+/gu;
+const FTS_CJK_NORMALIZED_VERSION = "3"; // bumped: vaporetto WASM morphological tokenization
 
-// --- Kuromoji Japanese morphological analyzer (lazy singleton) ---
+// --- Vaporetto WASM Japanese morphological analyzer (lazy singleton) ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _kuromojiTokenizer: any = null;
-let _kuromojiInitPromise: Promise<any> | null = null;
+let _vaporettoTokenizer: any = null;
+let _vaporettoInitPromise: Promise<any> | null = null;
 
 /**
- * Pre-initialize the kuromoji Japanese morphological analyzer.
+ * Resolve the Vaporetto model file path relative to this module.
+ * The model is bundled under vendor/vaporetto-node-wasm/../models/ relative to the project root.
+ */
+function _resolveVaporettoModelPath(): string {
+  // __dirname equivalent for ESM
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  // src/ → project root → models/
+  // Prefer the lightweight c0.003 model (fast init, good loanword accuracy for FTS)
+  // over the UniDic model (3s init cost is too high for CLI/MCP use).
+  const rawPath = pathJoin(thisDir, "..", "models", "vaporetto-bccwj.model");
+  const zstPath = pathJoin(thisDir, "..", "models", "vaporetto-bccwj.model.zst");
+  return existsSync(rawPath) ? rawPath : zstPath;
+}
+
+/**
+ * Pre-initialize the Vaporetto WASM Japanese morphological analyzer.
  * Call this before indexing or search operations involving CJK text.
  * normalizeCjkForFTS() falls back to unigram mode if not yet initialized.
  */
-export async function initializeKuromojiTokenizer(): Promise<void> {
-  if (_kuromojiTokenizer) return;
-  if (!_kuromojiInitPromise) {
-    _kuromojiInitPromise = (async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const kuromoji = ((await import("kuromoji")) as any).default;
+export async function initializeVaporettoTokenizer(): Promise<void> {
+  if (_vaporettoTokenizer) return;
+  if (!_vaporettoInitPromise) {
+    _vaporettoInitPromise = (async () => {
       const req = createRequire(import.meta.url);
-      const dicPath = dirname(dirname(req.resolve("kuromoji"))) + "/dict";
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return new Promise<any>((resolve, reject) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        kuromoji.builder({ dicPath }).build((err: Error | null, tokenizer: any) => {
-          if (err) reject(err);
-          else resolve(tokenizer);
-        });
-      });
+      const { VaporettoTokenizer } = req(pathJoin(dirname(fileURLToPath(import.meta.url)), "..", "vendor", "vaporetto-node-wasm", "vaporetto_node_wasm.js")) as any;
+      const modelPath = _resolveVaporettoModelPath();
+      const modelData = readFileSync(modelPath);
+      return new VaporettoTokenizer(modelData);
     })();
   }
-  _kuromojiTokenizer = await _kuromojiInitPromise;
+  _vaporettoTokenizer = await _vaporettoInitPromise;
+}
+
+/**
+ * Alias for backward compatibility: CLI and MCP code that calls
+ * initializeKuromojiTokenizer() will transparently use Vaporetto WASM instead.
+ */
+export async function initializeKuromojiTokenizer(): Promise<void> {
+  return initializeVaporettoTokenizer();
 }
 
 /**
  * FTS5's unicode61 tokenizer does not segment CJK text into searchable words.
- * When kuromoji is initialized (via initializeKuromojiTokenizer()), uses morphological
+ * When vaporetto is initialized (via initializeVaporettoTokenizer()), uses morphological
  * analysis for accurate Japanese word-boundary segmentation.
- * Falls back to character-level unigram spacing if kuromoji is not yet ready.
+ * Falls back to character-level unigram spacing if not yet initialized.
  */
 export function normalizeCjkForFTS(text: string): string {
-  if (_kuromojiTokenizer) {
+  if (_vaporettoTokenizer) {
     return text.replace(CJK_RUN_PATTERN, run => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tokens: Array<{ surface_form: string }> = _kuromojiTokenizer.tokenize(run);
-      return " " + tokens.map((t: { surface_form: string }) => t.surface_form).join(" ") + " ";
+      const tokenized: string = (_vaporettoTokenizer as any).tokenize(run);
+      return " " + tokenized + " ";
     });
   }
   // Fallback: original character-level unigram
