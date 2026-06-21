@@ -1,22 +1,22 @@
 {
-	"name": "qmd",
+	"name": "qmd-ja",
 	"owner": {
-		"name": "tobi",
-		"email": "tobi@lutke.com"
+		"name": "Koz Oda",
+		"email": "oss@joycodetech.jp"
 	},
 	"plugins": [
 		{
-			"name": "qmd",
+			"name": "qmd-ja",
 			"source": "./",
-			"description": "Search and retrieve documents from local markdown files.",
-			"version": "0.1.0",
+			"description": "Japanese-enhanced fork of qmd — Vaporetto WASM morphological tokenizer for accurate Japanese BM25 full-text search.",
+			"version": "2.5.3",
 			"author": {
-				"name": "tobi",
-				"email": "tobi@lutke.com"
+				"name": "Koz Oda",
+				"email": "oss@joycodetech.jp"
 			},
-			"repository": "https://github.com/tobi/qmd",
+			"repository": "https://github.com/joycodetech/qmd-ja",
 			"license": "MIT",
-			"keywords": ["markdown", "search", "qmd"],
+			"keywords": ["markdown", "search", "qmd", "japanese", "fts", "vaporetto"],
 			"skills": ["./skills/"],
 			"mcpServers": {
 				"qmd": {

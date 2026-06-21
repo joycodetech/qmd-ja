@@ -17,6 +17,8 @@
   "files": [
     "bin/",
     "dist/",
+    "vendor/",
+    "models/vaporetto-bccwj.model",
     "skills/",
     "scripts/build.mjs",
     "scripts/check-package-grammars.mjs",
