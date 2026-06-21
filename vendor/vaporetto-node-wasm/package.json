@@ -1,0 +1,11 @@
+{
+  "name": "vaporetto-node-wasm",
+  "version": "0.1.0",
+  "files": [
+    "vaporetto_node_wasm_bg.wasm",
+    "vaporetto_node_wasm.js",
+    "vaporetto_node_wasm.d.ts"
+  ],
+  "main": "vaporetto_node_wasm.js",
+  "types": "vaporetto_node_wasm.d.ts"
+}

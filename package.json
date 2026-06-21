@@ -17,7 +17,11 @@
   "files": [
     "bin/",
     "dist/",
-    "vendor/",
+    "vendor/vaporetto-node-wasm/vaporetto_node_wasm.js",
+    "vendor/vaporetto-node-wasm/vaporetto_node_wasm_bg.wasm",
+    "vendor/vaporetto-node-wasm/vaporetto_node_wasm.d.ts",
+    "vendor/vaporetto-node-wasm/vaporetto_node_wasm_bg.wasm.d.ts",
+    "vendor/vaporetto-node-wasm/package.json",
     "models/vaporetto-bccwj.model",
     "skills/",
     "scripts/build.mjs",

@@ -19,9 +19,8 @@ finetune/outputs/
 finetune/data/train/
 .claude/
 
-# Vaporetto model (binary, do not commit)
-models/*.model
+# Vaporetto models: commit lightweight model, exclude large UniDic
 models/*.model.zst
 
-# Vendored WASM build (regenerate with: cd /path/to/vaporetto-node-wasm && wasm-pack build --target nodejs)
-vendor/
+# vendor/ is tracked: Vaporetto WASM pre-built bindings (176KB, required for npm distribution)
+
