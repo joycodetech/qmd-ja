@@ -22,6 +22,6 @@ describe("Node ESM entrypoints", () => {
       stdio: "pipe",
     });
 
-    expect(output).toContain("qmd ");
+    expect(output).toContain("qmd-ja ");
   }, 120_000);
 });

@@ -2352,7 +2352,7 @@ describe("mcp stdio launcher", () => {
       await mkdir(join(tempPackage, "fake-bin"), { recursive: true });
 
       const qmdBin = join(tempPackage, "bin", "qmd");
-      await copyFile(join(projectRoot, "bin", "qmd"), qmdBin);
+      await copyFile(join(projectRoot, "bin", "qmd-ja"), qmdBin);
       await chmod(qmdBin, 0o755);
 
       // Force the wrapper down the Node branch, then put our fake `node` first
