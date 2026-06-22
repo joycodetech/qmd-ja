@@ -1,6 +1,6 @@
 {
   "name": "@joycodetech/qmd-ja",
-  "version": "2.5.5",
+  "version": "2.5.3-ja.3",
   "description": "Japanese-enhanced fork of qmd — On-device hybrid search with Vaporetto WASM morphological tokenizer for accurate Japanese BM25 full-text search",
   "type": "module",
   "main": "dist/index.js",
