@@ -24,3 +24,12 @@ models/*.model.zst
 
 # vendor/ is tracked: Vaporetto WASM pre-built bindings (176KB, required for npm distribution)
 
+
+# Security: never commit secrets or keys
+.env
+.env.*
+*.key
+*.pem
+
+# npm pack artifacts
+*.tgz
