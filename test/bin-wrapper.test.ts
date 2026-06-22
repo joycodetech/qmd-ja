@@ -49,7 +49,7 @@ function makePackage(root: string, packagePath: string, lockfiles: string[] = []
   const packageRoot = join(root, packagePath);
   const includeDist = options.dist ?? true;
   mkdirSync(join(packageRoot, "bin"), { recursive: true });
-  copyFileSync(join(repoRoot, "bin", "qmd"), join(packageRoot, "bin", "qmd"));
+  copyFileSync(join(repoRoot, "bin", "qmd-ja"), join(packageRoot, "bin", "qmd"));
   chmodSync(join(packageRoot, "bin", "qmd"), 0o755);
   if (includeDist) {
     mkdirSync(join(packageRoot, "dist", "cli"), { recursive: true });
