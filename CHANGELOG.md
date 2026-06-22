@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.5.4] - 2026-06-22
+
 ### Documentation
 
 - README: documented collection filtering (`-c` semantics), the `collection
