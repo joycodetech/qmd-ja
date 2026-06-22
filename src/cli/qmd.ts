@@ -76,6 +76,9 @@ import {
   getDefaultDbPath,
   reindexCollection,
   initializeKuromojiTokenizer,
+  initializeVaporettoTokenizer,
+  FTS_CJK_NORMALIZED_VERSION,
+  resolveVaporettoModelPath,
   generateEmbeddings,
   maybeAdoptLegacyEmbeddingFingerprint,
   syncConfigToDb,
@@ -3961,6 +3964,25 @@ async function showDoctor(): Promise<void> {
     doctorCheck("sqlite-vec", false, error instanceof Error ? error.message : String(error));
   }
 
+  // CJK tokenizer check (qmd-ja: Vaporetto WASM)
+  try {
+    await initializeVaporettoTokenizer();
+    const modelPath = resolveVaporettoModelPath();
+    const modelName = modelPath.split("/").pop() ?? modelPath;
+    let ftsLabel = "not indexed yet";
+    try {
+      const row = db.prepare(`SELECT value FROM store_config WHERE key = 'fts_cjk_normalized_version'`).get() as { value?: string } | undefined;
+      if (row?.value === FTS_CJK_NORMALIZED_VERSION) {
+        ftsLabel = `v${FTS_CJK_NORMALIZED_VERSION} (current)`;
+      } else if (row?.value) {
+        ftsLabel = `v${row.value} -> v${FTS_CJK_NORMALIZED_VERSION} (stale, run qmd-ja update)`;
+      }
+    } catch { /* ignore */ }
+    doctorCheck("CJK tokenizer", true, `Vaporetto WASM — model: ${modelName}, FTS index: ${ftsLabel}`);
+  } catch (error) {
+    doctorCheck("CJK tokenizer", false, `Vaporetto WASM failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const configCheck = checkDoctorIndexConfig(nextSteps);
   const configModels = configCheck.config?.models ?? {};
   checkEnvironmentOverrides(activeModels, configModels);
@@ -4085,7 +4107,7 @@ async function showVersion(): Promise<void> {
   }
 
   const versionStr = commit ? `${pkg.version} (${commit})` : pkg.version;
-  console.log(`qmd ${versionStr}`);
+  console.log(`qmd-ja ${versionStr}`);
 }
 
 // Main CLI - only run if this is the main module

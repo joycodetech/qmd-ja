@@ -760,7 +760,7 @@ const CJK_CHAR_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\
 // parts of katakana words (e.g. "ナレッジベース").  Without these, the regex splits
 // on "ー" and vaporetto receives broken sub-strings like "ナレッジベ" and "ス".
 const CJK_RUN_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}・ー]+/gu;
-const FTS_CJK_NORMALIZED_VERSION = "3"; // bumped: vaporetto WASM morphological tokenization
+export const FTS_CJK_NORMALIZED_VERSION = "3"; // bumped: vaporetto WASM morphological tokenization
 
 // --- Vaporetto WASM Japanese morphological analyzer (lazy singleton) ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -771,7 +771,7 @@ let _vaporettoInitPromise: Promise<any> | null = null;
  * Resolve the Vaporetto model file path relative to this module.
  * The model is bundled under vendor/vaporetto-node-wasm/../models/ relative to the project root.
  */
-function _resolveVaporettoModelPath(): string {
+export function resolveVaporettoModelPath(): string {
   // __dirname equivalent for ESM
   const thisDir = dirname(fileURLToPath(import.meta.url));
   // src/ → project root → models/
@@ -794,7 +794,7 @@ export async function initializeVaporettoTokenizer(): Promise<void> {
       const req = createRequire(import.meta.url);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { VaporettoTokenizer } = req(pathJoin(dirname(fileURLToPath(import.meta.url)), "..", "vendor", "vaporetto-node-wasm", "vaporetto_node_wasm.js")) as any;
-      const modelPath = _resolveVaporettoModelPath();
+      const modelPath = resolveVaporettoModelPath();
       const modelData = readFileSync(modelPath);
       return new VaporettoTokenizer(modelData);
     })();
