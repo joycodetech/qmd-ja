@@ -781,90 +781,6 @@ function sanitizeFTS5Phrase(phrase: string): string {
     .join(' ');
 }
 
-function rebuildFTSForCjkNormalization(db: Database): void {
-  const version = db.prepare(`SELECT value FROM store_config WHERE key = 'fts_cjk_normalized_version'`).get() as { value?: string } | undefined;
-  if (version?.value === FTS_CJK_NORMALIZED_VERSION) return;
-
-  // Stream rows from disk and build into a shadow FTS table, committing in
-  // small batches. The previous implementation cleared documents_fts up front
-  // and loaded every body into memory via .all() inside one transaction; on a
-  // large library that OOMs the process AND leaves FTS empty if it crashes
-  // mid-rebuild. Building a separate documents_fts_rebuild table and only
-  // atomically swapping it in at the very end means the live FTS index keeps
-  // serving queries until the new index is complete, and a crash leaves the
-  // old index intact (the half-built shadow table is dropped on next run).
-  const BATCH_SIZE = 500;
-
-  // A shadow table may linger from a prior crashed run — start clean.
-  db.exec(`DROP TABLE IF EXISTS documents_fts_rebuild`);
-  db.exec(`
-    CREATE VIRTUAL TABLE documents_fts_rebuild USING fts5(
-      filepath, title, body,
-      tokenize='porter unicode61'
-    )
-  `);
-
-  type FtsRow = { id: number; collection: string; path: string; title: string; body: string };
-
-  const insert = db.prepare(`INSERT INTO documents_fts_rebuild(rowid, filepath, title, body) VALUES (?, ?, ?, ?)`);
-
-  // The transaction closes over a mutable `batch` buffer rather than taking the
-  // batch as an argument: the wrapper's transaction() type only accepts scalar
-  // SQLiteValue args, and we want each commit to wrap a bounded set of inserts.
-  let batch: FtsRow[] = [];
-  const flushBatch = db.transaction(() => {
-    for (const row of batch) {
-      insert.run(
-        row.id,
-        normalizeCjkForFTS(`${row.collection}/${row.path}`),
-        normalizeCjkForFTS(row.title),
-        normalizeCjkForFTS(row.body)
-      );
-    }
-  });
-
-  // .iterate() pulls rows one at a time from SQLite rather than materializing
-  // the entire result set (every document body) into a JS array up front.
-  const iterator = db.prepare(`
-    SELECT d.id, d.collection, d.path, d.title, content.doc as body
-    FROM documents d
-    JOIN content ON content.hash = d.hash
-    WHERE d.active = 1
-  `).iterate<FtsRow>();
-
-  for (const row of iterator) {
-    batch.push(row);
-    if (batch.length >= BATCH_SIZE) {
-      flushBatch();
-      batch = [];
-    }
-  }
-  if (batch.length > 0) {
-    flushBatch();
-  }
-
-  // Atomic swap: copy the completed shadow index into the live table and drop
-  // the shadow. Using INSERT INTO … SELECT + DROP avoids ALTER TABLE … RENAME,
-  // which on SQLite ≥ 3.25 re-validates every trigger body that references the
-  // renamed table — the documents_ai/documents_au triggers reference
-  // documents_fts by name, so renaming after a DROP fails with
-  // "no such table: main.documents_fts". The copy+drop path leaves the live
-  // table and its triggers untouched until the transaction commits.
-  const swap = db.transaction(() => {
-    db.exec(`DELETE FROM documents_fts`);
-    db.exec(
-      `INSERT INTO documents_fts(rowid, filepath, title, body)
-       SELECT rowid, filepath, title, body FROM documents_fts_rebuild`
-    );
-    db.exec(`DROP TABLE documents_fts_rebuild`);
-    db.prepare(`
-      INSERT OR REPLACE INTO store_config(key, value)
-      VALUES ('fts_cjk_normalized_version', ?)
-    `).run(FTS_CJK_NORMALIZED_VERSION);
-  });
-  swap();
-}
-
 function getUserVersion(db: Database): number {
   const row = db.prepare(`PRAGMA user_version`).get() as Record<string, number> | undefined;
   const value = row ? Object.values(row)[0] : 0;
@@ -932,6 +848,109 @@ function applyFtsSyncTriggers(db: Database): void {
   } catch (err) {
     db.exec(`ROLLBACK`);
     throw err;
+  }
+}
+
+function cjkRebuildVersion(db: Database): string | undefined {
+  const version = db.prepare(`SELECT value FROM store_config WHERE key = 'fts_cjk_normalized_version'`).get() as { value?: string } | undefined;
+  return version?.value;
+}
+
+function quoteSqlIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function dropTableIfExists(db: Database, tableName: string): void {
+  db.exec(`DROP TABLE IF EXISTS ${quoteSqlIdentifier(tableName)}`);
+}
+
+function rebuildFTSForCjkNormalization(db: Database): void {
+  if (cjkRebuildVersion(db) === FTS_CJK_NORMALIZED_VERSION) return;
+
+  // Clean up the legacy fixed-name shadow table left by an interrupted older
+  // rebuild implementation. New concurrent rebuilds use per-process names below.
+  dropTableIfExists(db, "documents_fts_rebuild");
+
+  // Stream rows from disk and build into a per-process shadow FTS table. A fixed
+  // shadow name made concurrent cold opens collide (`database is locked`, then
+  // `no such table: documents_fts_rebuild`) before the schema version could be
+  // stamped. The final live-table swap is protected by BEGIN IMMEDIATE and a
+  // double-checked version read, so only one process publishes the rebuild.
+  const BATCH_SIZE = 500;
+  const rebuildTable = `documents_fts_rebuild_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const quotedRebuildTable = quoteSqlIdentifier(rebuildTable);
+
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE ${quotedRebuildTable} USING fts5(
+        filepath, title, body,
+        tokenize='porter unicode61'
+      )
+    `);
+
+    type FtsRow = { id: number; collection: string; path: string; title: string; body: string };
+
+    const insert = db.prepare(`INSERT INTO ${quotedRebuildTable}(rowid, filepath, title, body) VALUES (?, ?, ?, ?)`);
+
+    // The transaction closes over a mutable `batch` buffer rather than taking the
+    // batch as an argument: the wrapper's transaction() type only accepts scalar
+    // SQLiteValue args, and we want each commit to wrap a bounded set of inserts.
+    let batch: FtsRow[] = [];
+    const flushBatch = db.transaction(() => {
+      for (const row of batch) {
+        insert.run(
+          row.id,
+          normalizeCjkForFTS(`${row.collection}/${row.path}`),
+          normalizeCjkForFTS(row.title),
+          normalizeCjkForFTS(row.body)
+        );
+      }
+    });
+
+    // .iterate() pulls rows one at a time from SQLite rather than materializing
+    // the entire result set (every document body) into a JS array up front.
+    const iterator = db.prepare(`
+      SELECT d.id, d.collection, d.path, d.title, content.doc as body
+      FROM documents d
+      JOIN content ON content.hash = d.hash
+      WHERE d.active = 1
+    `).iterate<FtsRow>();
+
+    for (const row of iterator) {
+      batch.push(row);
+      if (batch.length >= BATCH_SIZE) {
+        flushBatch();
+        batch = [];
+      }
+    }
+    if (batch.length > 0) {
+      flushBatch();
+    }
+
+    // Atomic publish: copy the completed shadow index into the live table and
+    // stamp the version while holding the writer lock. If another process won
+    // the race while this one was building its shadow, skip the publish and only
+    // drop this process's private shadow table.
+    db.exec(`BEGIN IMMEDIATE`);
+    try {
+      if (cjkRebuildVersion(db) !== FTS_CJK_NORMALIZED_VERSION) {
+        db.exec(`DELETE FROM documents_fts`);
+        db.exec(
+          `INSERT INTO documents_fts(rowid, filepath, title, body)
+           SELECT rowid, filepath, title, body FROM ${quotedRebuildTable}`
+        );
+        db.prepare(`
+          INSERT OR REPLACE INTO store_config(key, value)
+          VALUES ('fts_cjk_normalized_version', ?)
+        `).run(FTS_CJK_NORMALIZED_VERSION);
+      }
+      db.exec(`COMMIT`);
+    } catch (err) {
+      db.exec(`ROLLBACK`);
+      throw err;
+    }
+  } finally {
+    dropTableIfExists(db, rebuildTable);
   }
 }
 

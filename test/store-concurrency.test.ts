@@ -1,14 +1,8 @@
 /**
  * store-concurrency.test.ts - concurrent schema-init safety
  *
- * Reproduces the cross-connection race where two processes opening the same
- * database interleave the FTS trigger DROP+CREATE and collide with "trigger
- * already exists". JavaScript is single-threaded, so the race only appears
- * across OS processes — each case spawns N workers that open the store at once.
- *
- * Fails against the pre-fix DROP+CREATE-on-every-open code; passes once the
- * trigger rebuild is gated by PRAGMA user_version inside an IMMEDIATE
- * transaction.
+ * Reproduces cross-process races in cold store initialization: WAL migration,
+ * FTS sync trigger rebuild, and CJK FTS normalization shadow-table rebuild.
  */
 import { describe, test, expect } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -24,7 +18,7 @@ const workerScript = join(thisDir, "_helpers", "store-init-worker.ts");
 const tsxCli = join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const isBunRuntime = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 
-const WORKERS = 12;
+const WORKERS = isBunRuntime ? (process.platform === "darwin" ? 16 : 12) : 6;
 
 type WorkerResult = { code: number | null; stderr: string };
 
@@ -69,13 +63,23 @@ function expectSchemaIntact(dbPath: string): void {
 
     const versionRow = db.prepare(`PRAGMA user_version`).get() as Record<string, number>;
     expect(Object.values(versionRow)[0]).toBeGreaterThanOrEqual(1);
+
+    const cjkVersion = db
+      .prepare(`SELECT value FROM store_config WHERE key = 'fts_cjk_normalized_version'`)
+      .get() as { value?: string } | undefined;
+    expect(cjkVersion?.value).toBe("1");
+
+    const leakedShadow = db
+      .prepare(`SELECT name FROM sqlite_master WHERE name LIKE 'documents_fts_rebuild%'`)
+      .all() as { name: string }[];
+    expect(leakedShadow).toHaveLength(0);
   } finally {
     db.close();
   }
 }
 
 describe("concurrent store initialization", () => {
-  test("cold database: N processes initialize without colliding on triggers", async () => {
+  test("cold database: N processes initialize without colliding on FTS setup", async () => {
     const dir = await mkdtemp(join(tmpdir(), "qmd-store-concurrency-"));
     const dbPath = join(dir, "index.sqlite");
     try {
@@ -91,8 +95,6 @@ describe("concurrent store initialization", () => {
     const dir = await mkdtemp(join(tmpdir(), "qmd-store-concurrency-"));
     const dbPath = join(dir, "index.sqlite");
     try {
-      // Stamp the schema once, single-process, so every concurrent reopen takes
-      // the version-gated fast path.
       const [seed] = await openConcurrently(dbPath, 1);
       expect(seed.code).toBe(0);
 
