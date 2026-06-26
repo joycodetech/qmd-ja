@@ -1845,7 +1845,10 @@ export async function generateEmbeddings(
         const texts = chunkBatch.map(chunk => formatDocForEmbedding(chunk.text, chunk.title, embedModelUri));
 
         try {
-          const embeddings = await session.embedBatch(texts, { model });
+          // ONNX embed route: sequential via OnnxEmbedder (no LLM session needed)
+          const embeddings = isOnnxEmbedModel(embedModelUri)
+            ? await Promise.all(texts.map(t => getOrCreateOnnxEmbedder(embedModelUri).embed(t)))
+            : await session.embedBatch(texts, { model });
           for (let i = 0; i < chunkBatch.length; i++) {
             const chunk = chunkBatch[i]!;
             const embedding = embeddings[i];
