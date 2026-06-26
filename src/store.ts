@@ -36,6 +36,8 @@ import {
   type ILLMSession,
   isOnnxRerankModel,
   OnnxReranker,
+  isOnnxEmbedModel,
+  OnnxEmbedder,
 } from "./llm.js";
 import type {
   NamedCollection,
@@ -1712,7 +1714,10 @@ export async function generateEmbeddings(
     const tryEmbedChunk = async (chunk: ChunkItem): Promise<boolean> => {
       try {
         const text = formatDocForEmbedding(chunk.text, chunk.title, embedModelUri);
-        const result = await session.embed(text, { model });
+        // ONNX embed route (e.g. ruri-v3): bypass LLM session
+        const result = isOnnxEmbedModel(embedModelUri)
+          ? await getOrCreateOnnxEmbedder(embedModelUri).embed(text)
+          : await session.embed(text, { model });
         if (!result) {
           recordFailure(chunk, "embedding returned no vector");
           return false;
@@ -3688,6 +3693,12 @@ export async function searchVec(db: Database, query: string, model: string, limi
 async function getEmbedding(text: string, model: string, isQuery: boolean, session?: ILLMSession, llmOverride?: LlamaCpp): Promise<number[] | null> {
   // Format text using the appropriate prompt template
   const formattedText = isQuery ? formatQueryForEmbedding(text, model) : formatDocForEmbedding(text, undefined, model);
+  // ONNX embed route (e.g. ruri-v3 via @huggingface/transformers)
+  if (isOnnxEmbedModel(model)) {
+    const onnxEmbedder = getOrCreateOnnxEmbedder(model);
+    const result = await onnxEmbedder.embed(formattedText);
+    return result?.embedding ?? null;
+  }
   const result = session
     ? await session.embed(formattedText, { model, isQuery })
     : await (llmOverride ?? getDefaultLlamaCpp()).embed(formattedText, { model, isQuery });
@@ -3893,6 +3904,14 @@ function getOrCreateOnnxReranker(uri: string): OnnxReranker {
     _onnxRerankerInstances.set(uri, new OnnxReranker(uri));
   }
   return _onnxRerankerInstances.get(uri)!;
+}
+
+const _onnxEmbedderInstances: Map<string, OnnxEmbedder> = new Map();
+
+function getOrCreateOnnxEmbedder(uri: string): OnnxEmbedder {
+  if (!_onnxEmbedderInstances.has(uri))
+    _onnxEmbedderInstances.set(uri, new OnnxEmbedder(uri));
+  return _onnxEmbedderInstances.get(uri)!;
 }
 
 export async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<{ file: string; score: number }[]> {

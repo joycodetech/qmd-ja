@@ -87,12 +87,23 @@ export function isQwen3EmbeddingModel(modelUri: string): boolean {
 }
 
 /**
+ * Detect if a model URI is a ruri-v3 Japanese embedding model (ModernBERT encoder).
+ * ruri-v3 uses Japanese prefix scheme: "検索クエリ: " for queries, "検索文書: " for docs.
+ */
+export function isRuriV3Model(modelUri: string): boolean {
+  return /ruri/i.test(modelUri);
+}
+
+/**
  * Format a query for embedding.
  * Uses nomic-style task prefix format for embeddinggemma (default).
  * Uses Qwen3-Embedding instruct format when a Qwen embedding model is active.
  */
 export function formatQueryForEmbedding(query: string, modelUri?: string): string {
   const uri = modelUri ?? resolveEmbedModel();
+  if (isRuriV3Model(uri)) {
+    return `検索クエリ: ${query}`;
+  }
   if (isQwen3EmbeddingModel(uri)) {
     return `Instruct: Retrieve relevant documents for the given query\nQuery: ${query}`;
   }
@@ -106,6 +117,10 @@ export function formatQueryForEmbedding(query: string, modelUri?: string): strin
  */
 export function formatDocForEmbedding(text: string, title?: string, modelUri?: string): string {
   const uri = modelUri ?? resolveEmbedModel();
+  if (isRuriV3Model(uri)) {
+    // ruri-v3: Japanese prefix scheme for retrieval documents
+    return title ? `検索文書: ${title}\n${text}` : `検索文書: ${text}`;
+  }
   if (isQwen3EmbeddingModel(uri)) {
     // Qwen3-Embedding: documents are raw text, no task prefix
     return title ? `${title}\n${text}` : text;
@@ -1818,6 +1833,86 @@ export class OnnxReranker {
     await model?.dispose?.();
     this.model = null;
     this.tokenizer = null;
+    this.loadPromise = null;
+  }
+}
+
+
+// =============================================================================
+// ONNX Embedder (@huggingface/transformers 経由)
+// =============================================================================
+// URI format: onnxe:<HuggingFace-model-id>  or  onnxe:<model-id>/<dtype>
+// dtype defaults to "q8" (maps to onnx/model_quantized.onnx, 317 MB)
+// Example: onnxe:mochiya98/ruri-v3-310m-onnx/q8
+//
+// ruri-v3 (ModernBERT encoder) uses mean pooling.
+// For future decoder-based models (e.g. Qwen3-Embedding ONNX), the
+// pooling strategy is derived from isRuriV3Model().
+
+export function isOnnxEmbedModel(uri: string): boolean {
+  return uri.startsWith("onnxe:");
+}
+
+export function parseOnnxEmbedUri(uri: string): { modelId: string; dtype: string } | null {
+  if (!uri.startsWith("onnxe:")) return null;
+  const without = uri.slice(6);
+  const DTYPE_RE = /^(fp32|fp16|q8|q4|q4f16|uint8|int8)$/;
+  const slashIdx = without.lastIndexOf("/");
+  if (slashIdx !== -1 && DTYPE_RE.test(without.slice(slashIdx + 1))) {
+    return { modelId: without.slice(0, slashIdx), dtype: without.slice(slashIdx + 1) };
+  }
+  return { modelId: without, dtype: "q8" };
+}
+
+export class OnnxEmbedder {
+  private modelId: string;
+  private dtype: string;
+  private extractorPipeline: unknown = null;
+  private loadPromise: Promise<void> | null = null;
+
+  constructor(uri: string) {
+    const parsed = parseOnnxEmbedUri(uri);
+    if (!parsed) throw new Error(`Invalid ONNX embed URI: ${uri}`);
+    this.modelId = parsed.modelId;
+    this.dtype = parsed.dtype;
+  }
+
+  private async ensurePipeline(): Promise<void> {
+    if (this.extractorPipeline) return;
+    if (this.loadPromise) return this.loadPromise;
+
+    this.loadPromise = (async () => {
+      const { pipeline } = await import("@huggingface/transformers");
+      this.extractorPipeline = await (pipeline as (task: string, model: string, opts: Record<string, unknown>) => Promise<unknown>)(
+        "feature-extraction",
+        this.modelId,
+        { dtype: this.dtype },
+      );
+    })();
+
+    return this.loadPromise;
+  }
+
+  async embed(text: string): Promise<EmbeddingResult | null> {
+    await this.ensurePipeline();
+    const pipe = this.extractorPipeline as (input: string, opts: Record<string, unknown>) => Promise<{ data: ArrayLike<number> }>;
+    try {
+      // ruri-v3 (ModernBERT encoder): mean pooling
+      // Decoder-based models (e.g. Qwen3-Embedding): last_token pooling
+      const pooling = isRuriV3Model(this.modelId) ? "mean" : "last_token";
+      const output = await pipe(text, { pooling, normalize: true });
+      const vector = Array.from(output.data) as number[];
+      return { embedding: vector, model: `${this.modelId}/${this.dtype}` };
+    } catch (error) {
+      console.error("ONNX embed error:", error);
+      return null;
+    }
+  }
+
+  async dispose(): Promise<void> {
+    const pipe = this.extractorPipeline as { dispose?: () => Promise<void> } | null;
+    await pipe?.dispose?.();
+    this.extractorPipeline = null;
     this.loadPromise = null;
   }
 }
