@@ -1808,7 +1808,10 @@ export async function generateEmbeddings(
       if (!vectorTableInitialized) {
         const firstChunk = batchChunks[0]!;
         const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title, embedModelUri);
-        const firstResult = await session.embed(firstText, { model });
+        // ONNX embed route: bypass LLM session for dimensions probe
+        const firstResult = isOnnxEmbedModel(embedModelUri)
+          ? await getOrCreateOnnxEmbedder(embedModelUri).embed(firstText)
+          : await session.embed(firstText, { model });
         if (!firstResult) {
           throw new Error("Failed to get embedding dimensions from first chunk");
         }
