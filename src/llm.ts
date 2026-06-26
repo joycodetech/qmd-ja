@@ -1730,6 +1730,98 @@ export class LlamaCpp implements LLM {
   }
 }
 
+
+// =============================================================================
+// ONNX Reranker (@huggingface/transformers 経由)
+// =============================================================================
+
+export function isOnnxRerankModel(uri: string): boolean {
+  return uri.startsWith("onnx:");
+}
+
+export function parseOnnxRerankUri(uri: string): { modelId: string; modelFileName: string } | null {
+  if (!uri.startsWith("onnx:")) return null;
+  const without = uri.slice(5);
+  const idx = without.lastIndexOf("/");
+  if (idx === -1) return null;
+  return {
+    modelId: without.slice(0, idx),
+    modelFileName: without.slice(idx + 1),
+  };
+}
+
+export class OnnxReranker {
+  private modelId: string;
+  private modelFileName: string;
+  private tokenizer: unknown = null;
+  private model: unknown = null;
+  private loadPromise: Promise<void> | null = null;
+
+  constructor(uri: string) {
+    const parsed = parseOnnxRerankUri(uri);
+    if (!parsed) throw new Error(`Invalid ONNX rerank URI: ${uri}`);
+    this.modelId = parsed.modelId;
+    this.modelFileName = parsed.modelFileName;
+  }
+
+  private async ensureModel(): Promise<void> {
+    if (this.model && this.tokenizer) return;
+    if (this.loadPromise) return this.loadPromise;
+
+    this.loadPromise = (async () => {
+      const { AutoTokenizer, AutoModelForSequenceClassification } = await import("@huggingface/transformers");
+      const [tok, mdl] = await Promise.all([
+        AutoTokenizer.from_pretrained(this.modelId),
+        AutoModelForSequenceClassification.from_pretrained(this.modelId, {
+          dtype: "fp32",
+          model_file_name: this.modelFileName,
+        }),
+      ]);
+      this.tokenizer = tok;
+      this.model = mdl;
+    })();
+
+    return this.loadPromise;
+  }
+
+  async rerank(query: string, documents: RerankDocument[]): Promise<RerankResult> {
+    await this.ensureModel();
+
+    const tokenizer = this.tokenizer as any;
+    const model = this.model as any;
+
+    const scored: RerankDocumentResult[] = [];
+
+    for (const [i, doc] of documents.entries()) {
+      const encoded = tokenizer(query, {
+        text_pair: doc.text,
+        truncation: true,
+        max_length: 512,
+        padding: true,
+      });
+      const output = await model(encoded);
+      const logits: number[] = Array.from(output.logits.data as Float32Array);
+      // CrossEncoder: logits[0] が関連スコア（sigmoid で [0,1] に変換）
+      const rawScore = logits[0] ?? 0;
+      const score = 1 / (1 + Math.exp(-rawScore));
+      scored.push({ file: doc.file, score, index: i });
+    }
+
+    return {
+      results: scored.sort((a, b) => b.score - a.score),
+      model: `${this.modelId}/${this.modelFileName}`,
+    };
+  }
+
+  async dispose(): Promise<void> {
+    const model = this.model as any;
+    await model?.dispose?.();
+    this.model = null;
+    this.tokenizer = null;
+    this.loadPromise = null;
+  }
+}
+
 // =============================================================================
 // Session Management Layer
 // =============================================================================

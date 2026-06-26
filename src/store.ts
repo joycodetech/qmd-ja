@@ -32,7 +32,10 @@ import {
   DEFAULT_RERANK_MODEL_URI,
   DEFAULT_GENERATE_MODEL_URI,
   type RerankDocument,
+  type RerankResult,
   type ILLMSession,
+  isOnnxRerankModel,
+  OnnxReranker,
 } from "./llm.js";
 import type {
   NamedCollection,
@@ -3883,6 +3886,15 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
 // Reranking
 // =============================================================================
 
+const _onnxRerankerInstances: Map<string, OnnxReranker> = new Map();
+
+function getOrCreateOnnxReranker(uri: string): OnnxReranker {
+  if (!_onnxRerankerInstances.has(uri)) {
+    _onnxRerankerInstances.set(uri, new OnnxReranker(uri));
+  }
+  return _onnxRerankerInstances.get(uri)!;
+}
+
 export async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<{ file: string; score: number }[]> {
   // Prepend intent to rerank query so the reranker scores with domain context
   const rerankQuery = intent ? `${intent}\n\n${query}` : query;
@@ -3906,11 +3918,20 @@ export async function rerank(query: string, documents: { file: string; text: str
     }
   }
 
-  // Rerank uncached documents using LlamaCpp
+  // Rerank uncached documents
   if (uncachedDocsByChunk.size > 0) {
-    const llm = llmOverride ?? getDefaultLlamaCpp();
     const uncachedDocs = [...uncachedDocsByChunk.values()];
-    const rerankResult = await llm.rerank(rerankQuery, uncachedDocs, { model });
+    let rerankResult: RerankResult;
+
+    if (isOnnxRerankModel(model)) {
+      // ONNX ルート（hotchpotch など ModernBERT ベースの日本語 Reranker）
+      const onnxReranker = getOrCreateOnnxReranker(model);
+      rerankResult = await onnxReranker.rerank(rerankQuery, uncachedDocs);
+    } else {
+      // GGUF ルート（既存 node-llama-cpp）
+      const llm = llmOverride ?? getDefaultLlamaCpp();
+      rerankResult = await llm.rerank(rerankQuery, uncachedDocs, { model });
+    }
 
     // Cache results by chunk text so identical chunks across files are scored once.
     const textByFile = new Map(uncachedDocs.map(d => [d.file, d.text]));
