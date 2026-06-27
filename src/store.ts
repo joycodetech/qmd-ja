@@ -1671,11 +1671,11 @@ export async function generateEmbeddings(
   const totalDocs = docsToEmbed.length;
   const startTime = Date.now();
 
-  // Use store's LlamaCpp or global singleton, wrapped in a session
   const embedModelUri = model;
 
-  // Create a session manager for this llm instance
-  const result = await withLLMSessionForLlm(llm, async (session) => {
+  // ONNX embed models do not require a llama.cpp session. Creating one here
+  // makes onnxe: URIs look like GGUF model paths and breaks `qmd embed`.
+  const runEmbedding = async (session: ILLMSession | null) => {
     let chunksEmbedded = 0;
     let bytesProcessed = 0;
     let totalChunks = 0;
@@ -1717,7 +1717,7 @@ export async function generateEmbeddings(
         // ONNX embed route (e.g. ruri-v3): bypass LLM session
         const result = isOnnxEmbedModel(embedModelUri)
           ? await getOrCreateOnnxEmbedder(embedModelUri).embed(text)
-          : await session.embed(text, { model });
+          : await session!.embed(text, { model });
         if (!result) {
           recordFailure(chunk, "embedding returned no vector");
           return false;
@@ -1733,7 +1733,7 @@ export async function generateEmbeddings(
       }
     };
     const retryFailedChunks = async (force = false) => {
-      if (!session.isValid || retryQueue.size === 0) return;
+      if ((session && !session.isValid) || retryQueue.size === 0) return;
       if (!force && successesSinceRetry < RETRY_AFTER_SUCCESSFUL_CHUNKS) return;
       successesSinceRetry = 0;
 
@@ -1750,7 +1750,7 @@ export async function generateEmbeddings(
           await tryEmbedChunk(chunk);
         }
         if (!force || retried === 0) break;
-      } while (session.isValid && [...retryQueue].some(([key]) => {
+      } while ((!session || session.isValid) && [...retryQueue].some(([key]) => {
         const failure = failures.get(key);
         return !!failure && failure.attempts < MAX_RETRY_ATTEMPTS;
       }));
@@ -1759,7 +1759,7 @@ export async function generateEmbeddings(
 
     for (const batchMeta of batches) {
       // Abort early if session has been invalidated
-      if (!session.isValid) {
+      if (session && !session.isValid) {
         console.warn(`⚠ Session expired — skipping remaining document batches`);
         break;
       }
@@ -1778,7 +1778,8 @@ export async function generateEmbeddings(
           undefined, undefined, undefined,
           doc.path,
           options?.chunkStrategy,
-          session.signal,
+          session?.signal,
+          !isOnnxEmbedModel(embedModelUri),
         );
 
         for (let seq = 0; seq < chunks.length; seq++) {
@@ -1811,7 +1812,7 @@ export async function generateEmbeddings(
         // ONNX embed route: bypass LLM session for dimensions probe
         const firstResult = isOnnxEmbedModel(embedModelUri)
           ? await getOrCreateOnnxEmbedder(embedModelUri).embed(firstText)
-          : await session.embed(firstText, { model });
+          : await session!.embed(firstText, { model });
         if (!firstResult) {
           throw new Error("Failed to get embedding dimensions from first chunk");
         }
@@ -1824,7 +1825,7 @@ export async function generateEmbeddings(
 
       for (let batchStart = 0; batchStart < batchChunks.length; batchStart += BATCH_SIZE) {
         // Abort early if session has been invalidated (e.g. max duration exceeded)
-        if (!session.isValid) {
+        if (session && !session.isValid) {
           const remainingChunks = batchChunks.slice(batchStart);
           for (const chunk of remainingChunks) recordFailure(chunk, "LLM session expired before embedding chunk");
           console.warn(`⚠ Session expired — skipping ${remainingChunks.length} remaining chunks`);
@@ -1848,7 +1849,7 @@ export async function generateEmbeddings(
           // ONNX embed route: sequential via OnnxEmbedder (no LLM session needed)
           const embeddings = isOnnxEmbedModel(embedModelUri)
             ? await Promise.all(texts.map(t => getOrCreateOnnxEmbedder(embedModelUri).embed(t)))
-            : await session.embedBatch(texts, { model });
+            : await session!.embedBatch(texts, { model });
           for (let i = 0; i < chunkBatch.length; i++) {
             const chunk = chunkBatch[i]!;
             const embedding = embeddings[i];
@@ -1868,7 +1869,7 @@ export async function generateEmbeddings(
           // individual retry succeeds, any prior failure for that chunk is
           // cleared, so the visible error count reflects outstanding failures.
           const batchReason = reasonFromError(error);
-          if (!session.isValid) {
+          if (session && !session.isValid) {
             for (const chunk of chunkBatch) recordFailure(chunk, `batch failed and session expired: ${batchReason}`);
             batchChunkBytesProcessed += chunkBatch.reduce((sum, c) => sum + c.bytes, 0);
           } else {
@@ -1905,7 +1906,11 @@ export async function generateEmbeddings(
     }
 
     return { chunksEmbedded, errors: activeErrorCount(), failures: failureList() };
-  }, { maxDuration: 30 * 60 * 1000, name: 'generateEmbeddings' });
+  };
+
+  const result = isOnnxEmbedModel(embedModelUri)
+    ? await runEmbedding(null)
+    : await withLLMSessionForLlm(llm, runEmbedding, { maxDuration: 30 * 60 * 1000, name: 'generateEmbeddings' });
 
   return {
     docsProcessed: totalDocs,
@@ -1972,7 +1977,7 @@ export function createStore(dbPath?: string): Store {
 
     // Query expansion & reranking
     expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model ?? store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL, db, intent, store.llm),
-    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => rerank(query, documents, model ?? store.llm?.rerankModelName ?? DEFAULT_RERANK_MODEL, db, intent, store.llm),
+    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => rerank(query, documents, model ?? store.llm?.rerankModelName, db, intent, store.llm),
 
     // Document retrieval
     findDocument: (filename: string, options?: { includeBody?: boolean }) => findDocument(db, filename, options),
@@ -2734,9 +2739,10 @@ export async function chunkDocumentByTokens(
   windowTokens: number = CHUNK_WINDOW_TOKENS,
   filepath?: string,
   chunkStrategy: ChunkStrategy = "regex",
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  useTokenizer: boolean = true
 ): Promise<{ text: string; pos: number; tokens: number }[]> {
-  const llm = getDefaultLlamaCpp();
+  const llm = useTokenizer ? getDefaultLlamaCpp() : null;
 
   // Use moderate chars/token estimate (prose ~4, code ~2, mixed ~3)
   // If chunks exceed limit, they'll be re-split with actual ratio
@@ -2758,6 +2764,25 @@ export async function chunkDocumentByTokens(
 
   const pushChunkWithinTokenLimit = async (text: string, pos: number): Promise<void> => {
     if (signal?.aborted) return;
+
+    if (!llm) {
+      const estimatedTokens = Math.ceil(text.length / avgCharsPerToken);
+      if (estimatedTokens <= maxTokens || text.length <= 1) {
+        results.push({ text, pos, tokens: estimatedTokens });
+        return;
+      }
+
+      const safeMaxChars = Math.max(1, maxChars);
+      const subChunks = chunkDocument(text, safeMaxChars, clampOverlapChars(overlapChars, safeMaxChars), windowChars);
+      if (subChunks.length <= 1 || subChunks[0]?.text.length === text.length) {
+        results.push({ text: text.slice(0, safeMaxChars), pos, tokens: Math.ceil(Math.min(text.length, safeMaxChars) / avgCharsPerToken) });
+        return;
+      }
+      for (const subChunk of subChunks) {
+        await pushChunkWithinTokenLimit(text.slice(subChunk.pos, subChunk.pos + subChunk.text.length), pos + subChunk.pos);
+      }
+      return;
+    }
 
     const tokens = await llm.tokenize(text);
     if (tokens.length <= maxTokens || text.length <= 1) {
@@ -3920,7 +3945,8 @@ function getOrCreateOnnxEmbedder(uri: string): OnnxEmbedder {
   return _onnxEmbedderInstances.get(uri)!;
 }
 
-export async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<{ file: string; score: number }[]> {
+export async function rerank(query: string, documents: { file: string; text: string }[], model: string | undefined = undefined, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<{ file: string; score: number }[]> {
+  const rerankModel = model ?? llmOverride?.rerankModelName ?? getDefaultLlamaCpp().rerankModelName ?? DEFAULT_RERANK_MODEL;
   // Prepend intent to rerank query so the reranker scores with domain context
   const rerankQuery = intent ? `${intent}\n\n${query}` : query;
 
@@ -3933,8 +3959,8 @@ export async function rerank(query: string, documents: { file: string; text: str
   // File path is excluded from the new cache key because the reranker score
   // depends on the chunk content, not where it came from.
   for (const doc of documents) {
-    const cacheKey = getCacheKey("rerank", { query: rerankQuery, model, chunk: doc.text });
-    const legacyCacheKey = getCacheKey("rerank", { query, file: doc.file, model, chunk: doc.text });
+    const cacheKey = getCacheKey("rerank", { query: rerankQuery, model: rerankModel, chunk: doc.text });
+    const legacyCacheKey = getCacheKey("rerank", { query, file: doc.file, model: rerankModel, chunk: doc.text });
     const cached = getCachedResult(db, cacheKey) ?? getCachedResult(db, legacyCacheKey);
     if (cached !== null) {
       cachedResults.set(doc.text, parseFloat(cached));
@@ -3948,21 +3974,21 @@ export async function rerank(query: string, documents: { file: string; text: str
     const uncachedDocs = [...uncachedDocsByChunk.values()];
     let rerankResult: RerankResult;
 
-    if (isOnnxRerankModel(model)) {
+    if (isOnnxRerankModel(rerankModel)) {
       // ONNX ルート（hotchpotch など ModernBERT ベースの日本語 Reranker）
-      const onnxReranker = getOrCreateOnnxReranker(model);
+      const onnxReranker = getOrCreateOnnxReranker(rerankModel);
       rerankResult = await onnxReranker.rerank(rerankQuery, uncachedDocs);
     } else {
       // GGUF ルート（既存 node-llama-cpp）
       const llm = llmOverride ?? getDefaultLlamaCpp();
-      rerankResult = await llm.rerank(rerankQuery, uncachedDocs, { model });
+      rerankResult = await llm.rerank(rerankQuery, uncachedDocs, { model: rerankModel });
     }
 
     // Cache results by chunk text so identical chunks across files are scored once.
     const textByFile = new Map(uncachedDocs.map(d => [d.file, d.text]));
     for (const result of rerankResult.results) {
       const chunk = textByFile.get(result.file) || "";
-      const cacheKey = getCacheKey("rerank", { query: rerankQuery, model, chunk });
+      const cacheKey = getCacheKey("rerank", { query: rerankQuery, model: rerankModel, chunk });
       setCachedResult(db, cacheKey, result.score.toString());
       cachedResults.set(chunk, result.score);
     }
@@ -4759,7 +4785,9 @@ export async function hybridQuery(
     const textsToEmbed = vecQueries.map(q => formatQueryForEmbedding(q.text, embedModel));
     hooks?.onEmbedStart?.(textsToEmbed.length);
     const embedStart = Date.now();
-    const embeddings = await llm.embedBatch(textsToEmbed);
+    const embeddings = isOnnxEmbedModel(embedModel)
+      ? await Promise.all(textsToEmbed.map(text => getOrCreateOnnxEmbedder(embedModel).embed(text)))
+      : await llm.embedBatch(textsToEmbed);
     hooks?.onEmbedDone?.(Date.now() - embedStart);
 
     // Run sqlite-vec lookups with pre-computed embeddings
@@ -5145,7 +5173,9 @@ export async function structuredSearch(
       const textsToEmbed = vecSearches.map(s => formatQueryForEmbedding(s.query, embedModel));
       hooks?.onEmbedStart?.(textsToEmbed.length);
       const embedStart = Date.now();
-      const embeddings = await llm.embedBatch(textsToEmbed);
+      const embeddings = isOnnxEmbedModel(embedModel)
+        ? await Promise.all(textsToEmbed.map(text => getOrCreateOnnxEmbedder(embedModel).embed(text)))
+        : await llm.embedBatch(textsToEmbed);
       hooks?.onEmbedDone?.(Date.now() - embedStart);
 
       for (let i = 0; i < vecSearches.length; i++) {

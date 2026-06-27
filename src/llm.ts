@@ -2088,7 +2088,14 @@ class LLMSession implements ILLMSession {
     documents: RerankDocument[],
     options?: RerankOptions
   ): Promise<RerankResult> {
-    return this.withOperation(() => this.manager.getLlamaCpp().rerank(query, documents, options));
+    return this.withOperation(async () => {
+      const llm = this.manager.getLlamaCpp();
+      const model = options?.model ?? llm.rerankModelName;
+      if (isOnnxRerankModel(model)) {
+        return new OnnxReranker(model).rerank(query, documents);
+      }
+      return llm.rerank(query, documents, { ...options, model });
+    });
   }
 }
 
