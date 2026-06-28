@@ -94,3 +94,7 @@ export function getEmbeddingProvider(modelUri: string, session?: ILLMSession | L
 export function getRerankProvider(modelUri: string, session?: ILLMSession | LlamaCpp): RerankProvider {
   return isOnnxRerankModel(modelUri) ? new OnnxRerankProvider(modelUri) : new LlamaCppRerankProvider(session);
 }
+
+export function shouldUseLlamaCppTokenizerForEmbedding(modelUri: string): boolean {
+  return !isOnnxEmbedModel(modelUri);
+}

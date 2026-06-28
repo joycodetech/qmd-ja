@@ -318,6 +318,10 @@ export type PullResult = {
   refreshed: boolean;
 };
 
+export function isOnnxModelUri(uri: string): boolean {
+  return uri.startsWith("onnxe:") || uri.startsWith("onnx:");
+}
+
 type HfRef = {
   repo: string;
   file: string;
@@ -477,6 +481,16 @@ export async function pullModels(
 
   const results: PullResult[] = [];
   for (const model of models) {
+    if (isOnnxModelUri(model)) {
+      results.push({
+        model,
+        path: "@huggingface/transformers cache",
+        sizeBytes: 0,
+        refreshed: false,
+      });
+      continue;
+    }
+
     let refreshed = false;
     const hfRef = parseHfUri(model);
     const filename = model.split("/").pop();

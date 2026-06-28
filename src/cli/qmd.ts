@@ -85,7 +85,8 @@ import {
   type ReindexResult,
   type ChunkStrategy,
 } from "../store.js";
-import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
+import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive, isOnnxModelUri } from "../llm.js";
+import { getEmbeddingProvider, shouldUseLlamaCppTokenizerForEmbedding } from "../providers.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -3546,6 +3547,10 @@ function formatModelDiagnosticPath(path: string): string {
 
 function findCachedModelInspection(model: string): CachedModelInspection {
   const invalid: string[] = [];
+  if (isOnnxModelUri(model)) {
+    return { path: "@huggingface/transformers cache", invalid };
+  }
+
   if (model.startsWith("hf:")) {
     const filename = model.split("/").pop();
     if (!filename || !existsSync(DEFAULT_MODEL_CACHE_DIR)) return { path: null, invalid };
@@ -3712,7 +3717,7 @@ function checkModelCache(activeModels: { embed: string; generate: string; rerank
   }
 
   if (missing.length === 0 && invalid.length === 0) {
-    doctorCheck("model cache", true, `${cached.length} active ${cached.length === 1 ? "model is" : "models are"} downloaded and valid GGUF`);
+    doctorCheck("model cache", true, `${cached.length} active ${cached.length === 1 ? "model is" : "models are"} cached/available`);
     return;
   }
 
@@ -3758,11 +3763,13 @@ async function checkEmbeddingVectorSamples(db: Database, model: string, fingerpr
 
   const threshold = 0.0001;
   const mismatches: string[] = [];
+  const useLlamaCppTokenizer = shouldUseLlamaCppTokenizerForEmbedding(model);
 
   await withLLMSession(async (session) => {
+    const provider = getEmbeddingProvider(model, session);
     for (const sample of samples) {
       const hashSeq = `${sample.hash}_${sample.seq}`;
-      const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal);
+      const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal, useLlamaCppTokenizer);
       const chunk = chunks[sample.seq];
       if (!chunk) {
         mismatches.push(`${shortHashSeq(hashSeq)}: chunk no longer exists`);
@@ -3770,7 +3777,7 @@ async function checkEmbeddingVectorSamples(db: Database, model: string, fingerpr
       }
 
       const title = extractTitle(sample.body, sample.path);
-      const result = await session.embed(formatDocForEmbedding(chunk.text, title, model), { model });
+      const result = await provider.embed(formatDocForEmbedding(chunk.text, title, model), { model });
       if (!result) {
         mismatches.push(`${shortHashSeq(hashSeq)}: embedding failed`);
         continue;

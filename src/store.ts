@@ -35,7 +35,7 @@ import {
   type RerankResult,
   type ILLMSession,
 } from "./llm.js";
-import { getEmbeddingProvider, getRerankProvider } from "./providers.js";
+import { getEmbeddingProvider, getRerankProvider, shouldUseLlamaCppTokenizerForEmbedding } from "./providers.js";
 import type {
   NamedCollection,
   Collection,
@@ -1669,6 +1669,7 @@ export async function generateEmbeddings(
   const startTime = Date.now();
 
   const embedModelUri = model;
+  const useLlamaCppTokenizer = shouldUseLlamaCppTokenizerForEmbedding(embedModelUri);
 
   const runEmbedding = async (session: ILLMSession) => {
     const embeddingProvider = getEmbeddingProvider(embedModelUri, session);
@@ -1772,7 +1773,7 @@ export async function generateEmbeddings(
           doc.path,
           options?.chunkStrategy,
           session?.signal,
-          true,
+          useLlamaCppTokenizer,
         );
 
         for (let seq = 0; seq < chunks.length; seq++) {
@@ -2254,15 +2255,17 @@ export async function maybeAdoptLegacyEmbeddingFingerprint(store: Store, model: 
   const expectedHashSeq = `${sample.hash}_${sample.seq}`;
   const title = extractTitle(sample.body, sample.path);
   const llm = getLlm(store);
+  const useLlamaCppTokenizer = shouldUseLlamaCppTokenizerForEmbedding(model);
 
   return await withLLMSessionForLlm(llm, async (session) => {
-    const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal);
+    const chunks = await chunkDocumentByTokens(sample.body, undefined, undefined, undefined, sample.path, undefined, session.signal, useLlamaCppTokenizer);
     const chunk = chunks[sample.seq];
     if (!chunk) {
       return { checked: true, adopted: 0, reason: `sample chunk ${expectedHashSeq} no longer exists` };
     }
 
-    const result = await session.embed(formatDocForEmbedding(chunk.text, title, model), { model });
+    const provider = getEmbeddingProvider(model, session);
+    const result = await provider.embed(formatDocForEmbedding(chunk.text, title, model), { model });
     if (!result) {
       return { checked: true, adopted: 0, reason: "failed to embed legacy sample" };
     }

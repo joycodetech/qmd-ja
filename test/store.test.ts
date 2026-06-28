@@ -66,6 +66,10 @@ import {
 } from "../src/store.js";
 import type { CollectionConfig } from "../src/collections.js";
 
+vi.mock("@huggingface/transformers", () => ({
+  pipeline: async () => async () => ({ data: [0.1, 0.2, 0.3] }),
+}));
+
 // =============================================================================
 // LlamaCpp Setup
 // =============================================================================
@@ -3390,6 +3394,33 @@ describe("Embedding batching", () => {
       );
     } finally {
       sessionSpy.mockRestore();
+      setDefaultLlamaCpp(null);
+      await cleanupTestDb(store);
+    }
+  });
+
+  test("generateEmbeddings does not resolve ONNX embedding models through llama.cpp tokenization", async () => {
+    const store = await createTestStore();
+    const db = store.db;
+    const model = "onnxe:mochiya98/ruri-v3-310m-onnx/q8";
+    const tokenizer = {
+      async tokenize() {
+        throw new Error("llama.cpp tokenizer should not be used for ONNX embeddings");
+      },
+    };
+
+    setDefaultLlamaCpp(tokenizer as any);
+    store.llm = { embedModelName: model } as any;
+
+    try {
+      await insertTestDocument(db, "docs", { name: "onnx-doc", body: "# ONNX\n\nAlpha" });
+
+      const result = await generateEmbeddings(store, { model });
+
+      expect(result.errors).toBe(0);
+      expect(result.chunksEmbedded).toBe(1);
+      expect(db.prepare(`SELECT DISTINCT model FROM content_vectors`).all()).toEqual([{ model }]);
+    } finally {
       setDefaultLlamaCpp(null);
       await cleanupTestDb(store);
     }

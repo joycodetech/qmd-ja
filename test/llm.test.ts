@@ -21,6 +21,7 @@ import {
   resolveGenerateModel,
   resolveRerankModel,
   resolveModels,
+  pullModels,
   withLLMSession,
   canUnloadLLM,
   SessionReleasedError,
@@ -118,6 +119,48 @@ describe("LlamaCpp.modelExists", () => {
 
     expect(result.exists).toBe(false);
     expect(result.name).toBe("/nonexistent/path/model.gguf");
+  });
+});
+
+describe("pullModels", () => {
+  test("does not route ONNX model URIs through node-llama-cpp", async () => {
+    const resolveModelFile = vi.fn(async () => {
+      throw new Error("resolveModelFile should not be called for ONNX models");
+    });
+    setNodeLlamaCppModuleForTest({
+      LlamaLogLevel: { error: "error" },
+      resolveModelFile,
+      LlamaChatSession: vi.fn() as any,
+      getLlama: vi.fn() as any,
+    });
+
+    try {
+      const results = await pullModels(
+        [
+          "onnxe:mochiya98/ruri-v3-310m-onnx/q8",
+          "onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2",
+        ],
+        { cacheDir: `/tmp/qmd-pull-onnx-${process.pid}` }
+      );
+
+      expect(resolveModelFile).not.toHaveBeenCalled();
+      expect(results).toEqual([
+        {
+          model: "onnxe:mochiya98/ruri-v3-310m-onnx/q8",
+          path: "@huggingface/transformers cache",
+          sizeBytes: 0,
+          refreshed: false,
+        },
+        {
+          model: "onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2",
+          path: "@huggingface/transformers cache",
+          sizeBytes: 0,
+          refreshed: false,
+        },
+      ]);
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+    }
   });
 });
 
