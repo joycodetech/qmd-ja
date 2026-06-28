@@ -42,7 +42,7 @@ jobs:
           if npm view @joycodetech/qmd-ja@$CURRENT_VERSION version 2>/dev/null | grep -q "$CURRENT_VERSION"; then
             echo "Version $CURRENT_VERSION already published on npm, skipping."
           else
-            npm publish --provenance --access public
+            npm publish --provenance --access public --tag latest
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
