@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [2.5.3-ja.4] - 2026-06-28
+
+### Added
+
+- Added Provider-layer routing for ONNX embedding (`onnxe:`) and ONNX rerank
+  (`onnx:`) models, keeping model-format branching out of search logic.
+- Documented qmd-ja installation, CLI, SDK, MCP, GGUF/ONNX model URI formats,
+  Japanese ONNX model configuration, and benchmark behavior in README.
+
+### Fixed
+
+- `qmd-ja pull` no longer sends ONNX model URIs to `node-llama-cpp` GGUF model
+  resolution.
+- `qmd-ja doctor` now treats GGUF cache and Transformers cache-backed ONNX models
+  consistently.
+- `qmd-ja embed -f` now routes `onnxe:` embedding models through the ONNX
+  embedding provider instead of the llama.cpp tokenizer/model path.
+- `LLMSession.rerank()` now routes reranking through the Provider layer, so GGUF
+  and ONNX rerank models share the same public path.
+
 ## [2.5.3-ja.3] - 2026-06-22
 
 ### Documentation
