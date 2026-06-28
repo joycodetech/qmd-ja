@@ -19,8 +19,8 @@
 npm install -g @joycodetech/qmd-ja
 ```
 
-> All other features, commands, and MCP integration are identical to [tobi/qmd](https://github.com/tobi/qmd).
-> See the original documentation below ↓
+> Most features and MCP integration follow [tobi/qmd](https://github.com/tobi/qmd).
+> In qmd-ja, use the `qmd-ja` CLI command and the `@joycodetech/qmd-ja` package.
 
 ---
 
@@ -28,7 +28,7 @@ npm install -g @joycodetech/qmd-ja
 
 An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.
 
-QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking—all running locally via node-llama-cpp with GGUF models.
+QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking. qmd-ja can run GGUF models via node-llama-cpp and ONNX embedding/rerank models via @huggingface/transformers.
 
 ![QMD Architecture](assets/qmd-architecture.png)
 
@@ -37,47 +37,44 @@ You can read more about QMD's progress in the [CHANGELOG](CHANGELOG.md).
 ## Quick Start
 
 ```sh
-# Install globally (Node or Bun)
-npm install -g @tobilu/qmd
-# or
-bun install -g @tobilu/qmd
+# Install globally
+npm install -g @joycodetech/qmd-ja
 
 # Or run directly
-npx @tobilu/qmd ...
-bunx @tobilu/qmd ...
+npx @joycodetech/qmd-ja ...
 
 # Create collections for your notes, docs, and meeting transcripts
-qmd collection add ~/notes --name notes
-qmd collection add ~/Documents/meetings --name meetings
-qmd collection add ~/work/docs --name docs
+qmd-ja collection add ~/notes --name notes
+qmd-ja collection add ~/Documents/meetings --name meetings
+qmd-ja collection add ~/work/docs --name docs
 
 # Add context to help with search results, each piece of context will be returned when matching sub documents are returned. This works as a tree. This is the key feature of QMD as it allows LLMs to make much better contextual choices when selecting documents. Don't sleep on it!
-qmd context add qmd://notes "Personal notes and ideas"
-qmd context add qmd://meetings "Meeting transcripts and notes"
-qmd context add qmd://docs "Work documentation"
+qmd-ja context add qmd://notes "Personal notes and ideas"
+qmd-ja context add qmd://meetings "Meeting transcripts and notes"
+qmd-ja context add qmd://docs "Work documentation"
 
 # Generate embeddings for semantic search
-qmd embed
+qmd-ja embed
 
 # Search across everything
-qmd search "project timeline"           # Fast keyword search
-qmd vsearch "how to deploy"             # Semantic search
-qmd query "quarterly planning process"  # Hybrid + reranking (best quality)
+qmd-ja search "project timeline"           # Fast keyword search
+qmd-ja vsearch "how to deploy"             # Semantic search
+qmd-ja query "quarterly planning process"  # Hybrid + reranking (best quality)
 
 # Get a specific document
-qmd get "meetings/2024-01-15.md"
+qmd-ja get "meetings/2024-01-15.md"
 
 # Get a document by docid (shown in search results)
-qmd get "#abc123"
+qmd-ja get "#abc123"
 
 # Get multiple documents by glob pattern
-qmd multi-get "journals/2025-05*.md"
+qmd-ja multi-get "journals/2025-05*.md"
 
 # Search within a specific collection
-qmd search "API" -c notes
+qmd-ja search "API" -c notes
 
 # Export all matches for an agent
-qmd search "API" --all --files --min-score 0.3
+qmd-ja search "API" --all --files --min-score 0.3
 ```
 
 ### Using with AI Agents
@@ -86,13 +83,13 @@ QMD's `--json` and `--files` output formats are designed for agentic workflows:
 
 ```sh
 # Get structured results for an LLM
-qmd search "authentication" --json -n 10
+qmd-ja search "authentication" --json -n 10
 
 # List all relevant files above a threshold
-qmd query "error handling" --all --files --min-score 0.4
+qmd-ja query "error handling" --all --files --min-score 0.4
 
 # Retrieve full document content
-qmd get "docs/api-reference.md" --full
+qmd-ja get "docs/api-reference.md" --full
 ```
 
 ### MCP Server
@@ -111,27 +108,20 @@ Although the tool works perfectly fine when you just tell your agent to use it o
 {
   "mcpServers": {
     "qmd": {
-      "command": "qmd",
+      "command": "qmd-ja",
       "args": ["mcp"]
     }
   }
 }
 ```
 
-**Claude Code** — Install the plugin (recommended):
-
-```bash
-claude plugin marketplace add tobi/qmd
-claude plugin install qmd@qmd
-```
-
-Or configure MCP manually in `~/.claude/settings.json`:
+**Claude Code** — configure MCP manually in `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "qmd": {
-      "command": "qmd",
+      "command": "qmd-ja",
       "args": ["mcp"]
     }
   }
@@ -144,13 +134,13 @@ By default, QMD's MCP server uses stdio (launched as a subprocess by each client
 
 ```sh
 # Foreground (Ctrl-C to stop)
-qmd mcp --http                    # localhost:8181
-qmd mcp --http --port 8080        # custom port
+qmd-ja mcp --http                    # localhost:8181
+qmd-ja mcp --http --port 8080        # custom port
 
 # Background daemon
-qmd mcp --http --daemon           # start, writes PID to ~/.cache/qmd/mcp.pid
-qmd mcp stop                      # stop via PID file
-qmd status                        # shows "MCP: running (PID ...)" when active
+qmd-ja mcp --http --daemon           # start, writes PID to ~/.cache/qmd/mcp.pid
+qmd-ja mcp stop                      # stop via PID file
+qmd-ja status                        # shows "MCP: running (PID ...)" when active
 ```
 
 The HTTP server exposes two endpoints:
@@ -192,13 +182,13 @@ Use QMD as a library in your own Node.js or Bun applications.
 #### Installation
 
 ```sh
-npm install @tobilu/qmd
+npm install @joycodetech/qmd-ja
 ```
 
 #### Quick Start
 
 ```typescript
-import { createStore } from '@tobilu/qmd'
+import { createStore } from '@joycodetech/qmd-ja'
 
 const store = await createStore({
   dbPath: './my-index.sqlite',
@@ -220,7 +210,7 @@ await store.close()
 `createStore()` accepts three modes:
 
 ```typescript
-import { createStore } from '@tobilu/qmd'
+import { createStore } from '@joycodetech/qmd-ja'
 
 // 1. Inline config — no files needed besides the DB
 const store = await createStore({
@@ -399,7 +389,7 @@ import type {
   CollectionConfig,    // Inline config shape
   IndexStatus,         // From getStatus()
   IndexHealthInfo,     // From getIndexHealth()
-} from '@tobilu/qmd'
+} from '@joycodetech/qmd-ja'
 ```
 
 Utility exports:
@@ -410,7 +400,7 @@ import {
   addLineNumbers,              // Add line numbers to text
   DEFAULT_MULTI_GET_MAX_BYTES, // Default max file size for multiGet (10KB)
   Maintenance,                 // Database maintenance operations
-} from '@tobilu/qmd'
+} from '@joycodetech/qmd-ja'
 ```
 
 #### Lifecycle
@@ -531,9 +521,15 @@ The `query` command uses **Reciprocal Rank Fusion (RRF)** with position-aware bl
   brew install sqlite
   ```
 
-### GGUF Models (via node-llama-cpp)
+### Models: GGUF and ONNX
 
-QMD uses three local GGUF models (auto-downloaded on first use):
+qmd-ja uses local models for embedding, reranking, and query expansion:
+
+- **Embedding**: GGUF via `node-llama-cpp` or ONNX via `@huggingface/transformers`
+- **Reranking**: GGUF via `node-llama-cpp` or ONNX via `@huggingface/transformers`
+- **Query expansion / generation**: GGUF via `node-llama-cpp`
+
+The default configuration uses GGUF models:
 
 | Model | Purpose | Size |
 |-------|---------|------|
@@ -541,7 +537,45 @@ QMD uses three local GGUF models (auto-downloaded on first use):
 | `qwen3-reranker-0.6b-q8_0` | Re-ranking | ~640MB |
 | `qmd-query-expansion-1.7B-q4_k_m` | Query expansion (fine-tuned) | ~1.1GB |
 
-Models are downloaded from HuggingFace and cached in `~/.cache/qmd/models/`.
+GGUF models are downloaded from Hugging Face and cached in `~/.cache/qmd/models/`.
+ONNX embedding/rerank models are resolved by `@huggingface/transformers` and use the Transformers cache.
+ONNX generation is not currently supported.
+
+Model URI formats:
+
+- GGUF: `hf:<org>/<repo>/<file.gguf>` or a local `.gguf` path
+- ONNX embedding: `onnxe:<model-id>` or `onnxe:<model-id>/<dtype>`
+- ONNX rerank: `onnx:<model-id>/<model-file-name>`
+
+The ONNX branching for embedding and rerank is implemented in the Provider layer, so search/indexing code does not need model-specific `onnx` checks.
+
+### Japanese ONNX Model Configuration
+
+For Japanese-heavy corpora, this configuration uses ONNX for embedding and reranking while keeping the GGUF query-expansion model:
+
+```yaml
+models:
+  embed: onnxe:mochiya98/ruri-v3-310m-onnx/q8
+  generate: hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf
+  rerank: onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2
+```
+
+You can also set the models with environment variables:
+
+```sh
+export QMD_EMBED_MODEL="onnxe:mochiya98/ruri-v3-310m-onnx/q8"
+export QMD_RERANK_MODEL="onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2"
+```
+
+After changing models:
+
+```sh
+qmd-ja pull
+qmd-ja doctor
+qmd-ja embed -f
+```
+
+`qmd-ja pull` downloads/checks GGUF models. ONNX embedding/rerank models are handled by the Transformers cache and are first resolved when used. `qmd-ja doctor` treats both cache styles as valid, and `qmd-ja embed -f` will run the ONNX embedding provider for `onnxe:` models.
 
 ### Custom Embedding Model
 
@@ -550,34 +584,32 @@ This is useful for multilingual corpora (e.g. Chinese, Japanese, Korean) where
 `embeddinggemma-300M` has limited coverage.
 
 ```sh
-# Use Qwen3-Embedding-0.6B for better multilingual (CJK) support
+# Use Qwen3-Embedding-0.6B GGUF for better multilingual (CJK) support
 export QMD_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
 
 # After changing the model, re-embed all collections:
-qmd embed -f
+qmd-ja embed -f
 ```
 
 Supported model families:
 - **embeddinggemma** (default) — English-optimized, small footprint
 - **Qwen3-Embedding** — Multilingual (119 languages including CJK), MTEB top-ranked
 
-> **Note:** When switching embedding models, you must re-index with `qmd embed -f`
+> **Note:** When switching embedding models, you must re-index with `qmd-ja embed -f`
 > since vectors are not cross-compatible between models. The prompt format is
 > automatically adjusted for each model family.
 
 ## Installation
 
 ```sh
-npm install -g @tobilu/qmd
-# or
-bun install -g @tobilu/qmd
+npm install -g @joycodetech/qmd-ja
 ```
 
 ### Development
 
 ```sh
-git clone https://github.com/tobi/qmd
-cd qmd
+git clone https://github.com/joycodetech/qmd-ja
+cd qmd-ja
 npm install
 npm link
 ```
@@ -588,54 +620,54 @@ npm link
 
 ```sh
 # Create a collection from current directory
-qmd collection add . --name myproject
+qmd-ja collection add . --name myproject
 
 # Create a collection with explicit path and custom glob mask
-qmd collection add ~/Documents/notes --name notes --mask "**/*.md"
+qmd-ja collection add ~/Documents/notes --name notes --mask "**/*.md"
 
 # List all collections
-qmd collection list
+qmd-ja collection list
 
 # Remove a collection
-qmd collection remove myproject
+qmd-ja collection remove myproject
 
 # Rename a collection
-qmd collection rename myproject my-project
+qmd-ja collection rename myproject my-project
 
 # List files in a collection
-qmd ls notes
-qmd ls notes/subfolder
+qmd-ja ls notes
+qmd-ja ls notes/subfolder
 
 # Show collection details (path, glob mask, include status, context count)
-qmd collection show notes
+qmd-ja collection show notes
 
 # Include or exclude a collection from default (unscoped) queries
-qmd collection include notes
-qmd collection exclude notes
+qmd-ja collection include notes
+qmd-ja collection exclude notes
 
-# Run a command before every `qmd update` (e.g. git pull); empty arg clears it
-qmd collection update-cmd notes 'git pull --rebase'
-qmd collection update-cmd notes
+# Run a command before every `qmd-ja update` (e.g. git pull); empty arg clears it
+qmd-ja collection update-cmd notes 'git pull --rebase'
+qmd-ja collection update-cmd notes
 ```
 
 ### Generate Vector Embeddings
 
 ```sh
 # Embed all indexed documents (900 tokens/chunk, 15% overlap)
-qmd embed
+qmd-ja embed
 
 # Force re-embed everything
-qmd embed -f
+qmd-ja embed -f
 
 # Enable AST-aware chunking for code files (TS, JS, Python, Go, Rust)
-qmd embed --chunk-strategy auto
+qmd-ja embed --chunk-strategy auto
 
 # Also works with query for consistent chunk selection
-qmd query "auth flow" --chunk-strategy auto
+qmd-ja query "auth flow" --chunk-strategy auto
 
 # Memory control for large corpora / constrained systems
-qmd embed --max-docs-per-batch 50   # cap docs per embedding batch
-qmd embed --max-batch-mb 64         # cap batch size in MB
+qmd-ja embed --max-docs-per-batch 50   # cap docs per embedding batch
+qmd-ja embed --max-batch-mb 64         # cap batch size in MB
 ```
 
 **AST-aware chunking** (`--chunk-strategy auto`) uses tree-sitter to chunk code
@@ -645,7 +677,7 @@ codebases. Markdown and other file types always use regex-based chunking
 regardless of strategy.
 
 The default is `regex` (existing behavior). Use `--chunk-strategy auto` to
-opt in. Run `qmd status` to verify which grammars are available.
+opt in. Run `qmd-ja status` to verify which grammars are available.
 
 > **Note:** Tree-sitter grammars are optional dependencies. If they are not
 > installed, `--chunk-strategy auto` falls back to regex-only chunking
@@ -657,21 +689,21 @@ Context adds descriptive metadata to collections and paths, helping search under
 
 ```sh
 # Add context to a collection (using qmd:// virtual paths)
-qmd context add qmd://notes "Personal notes and ideas"
-qmd context add qmd://docs/api "API documentation"
+qmd-ja context add qmd://notes "Personal notes and ideas"
+qmd-ja context add qmd://docs/api "API documentation"
 
 # Add context from within a collection directory
-cd ~/notes && qmd context add "Personal notes and ideas"
-cd ~/notes/work && qmd context add "Work-related notes"
+cd ~/notes && qmd-ja context add "Personal notes and ideas"
+cd ~/notes/work && qmd-ja context add "Work-related notes"
 
 # Add global context (applies to all collections)
-qmd context add / "Knowledge base for my projects"
+qmd-ja context add / "Knowledge base for my projects"
 
 # List all contexts
-qmd context list
+qmd-ja context list
 
 # Remove context
-qmd context rm qmd://notes/old
+qmd-ja context rm qmd://notes/old
 ```
 
 ### Search Commands
@@ -688,13 +720,13 @@ qmd context rm qmd://notes/old
 
 ```sh
 # Full-text search (fast, keyword-based)
-qmd search "authentication flow"
+qmd-ja search "authentication flow"
 
 # Vector search (semantic similarity)
-qmd vsearch "how to login"
+qmd-ja vsearch "how to login"
 
 # Hybrid search with re-ranking (best quality)
-qmd query "user authentication"
+qmd-ja query "user authentication"
 ```
 
 Two aliases exist for the semantic/hybrid modes: `vector-search` (→ `vsearch`)
@@ -722,7 +754,7 @@ and `deep-search` (→ `query`).
                    # (--json, --csv, --md, --xml, --files are legacy aliases)
 
 # Get options
-qmd get <file>[:from[:count]]  # Get document; optional start line and count
+qmd-ja get <file>[:from[:count]]  # Get document; optional start line and count
 -l <num>                       # Maximum lines to return
 --from <num>                   # Start line (overrides the :from suffix)
 --no-line-numbers              # Disable line numbering (on by default)
@@ -735,16 +767,16 @@ qmd get <file>[:from[:count]]  # Get document; optional start line and count
 ### Collection Filtering
 
 The `-c`/`--collection` flag filters results by collection **name** (as shown by
-`qmd collection list`). Collections are a global registry — you can search any
+`qmd-ja collection list`). Collections are a global registry — you can search any
 collection from any directory:
 
 ```sh
-qmd search "auth" -c notes           # single collection
-qmd search "auth" -c notes -c docs   # multiple collections (OR)
+qmd-ja search "auth" -c notes           # single collection
+qmd-ja search "auth" -c notes -c docs   # multiple collections (OR)
 ```
 
 With no `-c` flag, all default-included collections are searched. Collections
-marked excluded (`qmd collection exclude <name>`) are skipped unless named
+marked excluded (`qmd-ja collection exclude <name>`) are skipped unless named
 explicitly with `-c`.
 
 > **Note:** With multiple `-c` flags, results come from a global top-K pool and are
@@ -803,9 +835,9 @@ Template placeholders:
 - `{col}` or `{column}` 1-based column number
 
 - **Path**: Collection-relative path (e.g., `docs/guide.md`)
-- **Docid**: Short hash identifier (e.g., `#a1b2c3`) - use with `qmd get #a1b2c3`
+- **Docid**: Short hash identifier (e.g., `#a1b2c3`) - use with `qmd-ja get #a1b2c3`
 - **Title**: Extracted from document (first heading or filename)
-- **Context**: Path context if configured via `qmd context add`
+- **Context**: Path context if configured via `qmd-ja context add`
 - **Score**: Color-coded (green >70%, yellow >40%, dim otherwise)
 - **Snippet**: Context around match with query terms highlighted
 
@@ -813,19 +845,19 @@ Template placeholders:
 
 ```sh
 # Get 10 results with minimum score 0.3
-qmd query -n 10 --min-score 0.3 "API design patterns"
+qmd-ja query -n 10 --min-score 0.3 "API design patterns"
 
 # Output as markdown for LLM context
-qmd search --md --full "error handling"
+qmd-ja search --md --full "error handling"
 
 # JSON output for scripting
-qmd query --json "quarterly reports"
+qmd-ja query --json "quarterly reports"
 
 # Inspect how each result was scored (RRF + rerank blend)
-qmd query --json --explain "quarterly reports"
+qmd-ja query --json --explain "quarterly reports"
 
 # Use separate index for different knowledge base
-qmd --index work search "quarterly reports"
+qmd-ja --index work search "quarterly reports"
 ```
 
 The `--explain` flag attaches a score breakdown to each result: the FTS/vector
@@ -859,68 +891,74 @@ sub-query's contribution. Abbreviated:
 
 ```sh
 # Show index status and collections with contexts
-qmd status
+qmd-ja status
 
 # Re-index all collections. If a collection has a configured update command
-# (e.g. `git pull`), it runs first — set one with `qmd collection update-cmd`.
-qmd update
+# (e.g. `git pull`), it runs first — set one with `qmd-ja collection update-cmd`.
+qmd-ja update
 
 # Diagnose the install (runtime, sqlite-vec, embedding fingerprints, GPU probe)
-qmd doctor
+qmd-ja doctor
 
 # Initialize a project-local index in the current directory
-qmd init
+qmd-ja init
 
 # Get document by filepath (with fuzzy matching suggestions)
-qmd get notes/meeting.md
+qmd-ja get notes/meeting.md
 
 # Get document by docid (from search results)
-qmd get "#abc123"
+qmd-ja get "#abc123"
 
 # Get document starting at line 50, max 100 lines
-qmd get notes/meeting.md:50 -l 100
+qmd-ja get notes/meeting.md:50 -l 100
 
 # Read 40 lines starting at line 120 via the :from:count suffix (works with docids)
-qmd get notes/meeting.md:120:40
-qmd get "#abc123:120:40"
+qmd-ja get notes/meeting.md:120:40
+qmd-ja get "#abc123:120:40"
 
 # get / multi-get are line-numbered by default; disable with --no-line-numbers
-qmd get notes/meeting.md --no-line-numbers
+qmd-ja get notes/meeting.md --no-line-numbers
 
 # Get multiple documents by glob pattern
-qmd multi-get "journals/2025-05*.md"
+qmd-ja multi-get "journals/2025-05*.md"
 
 # Get multiple documents by comma-separated list (supports docids)
-qmd multi-get "doc1.md, doc2.md, #abc123"
+qmd-ja multi-get "doc1.md, doc2.md, #abc123"
 
 # Limit multi-get to files under 20KB
-qmd multi-get "docs/*.md" --max-bytes 20480
+qmd-ja multi-get "docs/*.md" --max-bytes 20480
 
 # Output multi-get as JSON for agent processing
-qmd multi-get "docs/*.md" --json
+qmd-ja multi-get "docs/*.md" --json
 
 # Clean up cache and orphaned data
-qmd cleanup
+qmd-ja cleanup
 ```
 
 ### Benchmarking
 
-Measure search quality across all four backends with `qmd bench` and a fixture file
+Measure search quality across all four backends with `qmd-ja bench` and a fixture file
 of queries with known-relevant documents.
 
 **From a git checkout**, an example fixture and its test corpus ship in the repo:
 
 ```sh
 # One-time setup (indexes the repo's test corpus into its own collection)
-qmd collection add test/eval-docs --name eval-docs
-qmd embed -c eval-docs
+qmd-ja collection add test/eval-docs --name eval-docs
+qmd-ja embed -c eval-docs
 
 # Run the benchmark (table output)
-qmd bench src/bench/fixtures/example.json
+qmd-ja bench src/bench/fixtures/example.json
 
 # JSON output for programmatic analysis
-qmd bench src/bench/fixtures/example.json --json
+qmd-ja bench src/bench/fixtures/example.json --json
 ```
+
+Bench uses the active index and model configuration. The `vector`, `hybrid`, and
+`full` backends run through the same Store and Provider paths as normal search,
+so GGUF and ONNX embedding/rerank changes are reflected after the collection is
+embedded with the selected models. If you switch embedding models, run
+`qmd-ja pull`, `qmd-ja doctor`, and `qmd-ja embed -f` before comparing results.
 
 > The example fixture (`src/bench/fixtures/example.json`) and its test corpus
 > (`test/eval-docs/`) exist only in a git checkout — they are **not** part of the
@@ -928,7 +966,7 @@ qmd bench src/bench/fixtures/example.json --json
 > (see below) against a collection you have already indexed:
 >
 > ```sh
-> qmd bench my-fixture.json -c my-collection
+> qmd-ja bench my-fixture.json -c my-collection
 > ```
 
 Each query runs against four backends, reporting precision@k, recall, MRR, and F1:
@@ -964,13 +1002,13 @@ either backend alone.
 }
 ```
 
-`expected_files` are collection-relative paths as shown by `qmd ls`. The `type`
+`expected_files` are collection-relative paths as shown by `qmd-ja ls`. The `type`
 field (`exact`, `semantic`, `topical`, `cross-domain`, `alias`) labels queries for
 grouping — it does not change search behavior.
 
 > **Heads-up:** if the fixture's collection isn't indexed, bench currently runs to
 > completion and reports all zeros with no warning. Verify setup with
-> `qmd ls <collection>` first.
+> `qmd-ja ls <collection>` first.
 
 ## Data Storage
 
@@ -995,6 +1033,9 @@ llm_cache       -- Cached LLM responses (query expansion, rerank scores)
 | `XDG_CACHE_HOME` | `~/.cache` | Cache directory location |
 | `QMD_LLAMA_GPU` | `auto` | Force llama.cpp GPU backend (`metal`, `vulkan`, `cuda`) or disable GPU with `false` |
 | `QMD_FORCE_CPU` | unset | Set to `1`/`true` to force CPU mode before any CUDA/Vulkan/Metal probing. Equivalent CLI flag: `--no-gpu`. |
+| `QMD_EMBED_MODEL` | GGUF default | Override embedding model. Supports `hf:...`, local GGUF paths, and `onnxe:...` ONNX embedding URIs. |
+| `QMD_RERANK_MODEL` | GGUF default | Override reranker model. Supports `hf:...`, local GGUF paths, and `onnx:...` ONNX rerank URIs. |
+| `QMD_GENERATE_MODEL` | GGUF default | Override query-expansion model. GGUF only, via `node-llama-cpp`. |
 | `QMD_EMBED_PARALLELISM` | automatic | Override embedding/reranking context parallelism (1-8). Windows CUDA defaults to `1` because parallel CUDA contexts can crash with `ggml-cuda.cu:98`; use Vulkan or raise this only if your driver is stable. |
 
 ## How It Works
@@ -1019,8 +1060,8 @@ Collection ──► Glob Pattern ──► Markdown Files ──► Parse Title
 Documents are chunked into ~900-token pieces with 15% overlap using smart boundary detection:
 
 ```
-Document ──► Smart Chunk (~900 tokens) ──► Format each chunk ──► node-llama-cpp ──► Store Vectors
-                │                           "title | text"        embedBatch()
+Document ──► Smart Chunk (~900 tokens) ──► Format each chunk ──► EmbeddingProvider ──► Store Vectors
+                │                           "title | text"        GGUF or ONNX
                 │
                 └─► Chunks stored with:
                     - hash: document hash
@@ -1112,13 +1153,32 @@ Query ──► LLM Expansion ──► [Original, Variant 1, Variant 2]
 
 ## Model Configuration
 
-Models are configured in `src/llm.ts` as HuggingFace URIs:
+Models are resolved in this order:
+
+1. index config `models`
+2. environment variables (`QMD_EMBED_MODEL`, `QMD_GENERATE_MODEL`, `QMD_RERANK_MODEL`)
+3. defaults in `src/llm.ts`
+
+Example index config:
+
+```yaml
+models:
+  embed: onnxe:mochiya98/ruri-v3-310m-onnx/q8
+  generate: hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf
+  rerank: onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2
+```
+
+The built-in defaults are GGUF Hugging Face URIs:
 
 ```typescript
 const DEFAULT_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
 const DEFAULT_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
 const DEFAULT_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf";
 ```
+
+ONNX URIs are supported for embedding (`onnxe:`) and reranking (`onnx:`). The
+`generate` model must remain a GGUF model because query expansion currently runs
+through `node-llama-cpp`.
 
 ### EmbeddingGemma Prompt Format
 
@@ -1132,7 +1192,7 @@ const DEFAULT_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query
 
 ### Qwen3-Reranker
 
-Uses node-llama-cpp's `createRankingContext()` and `rankAndSort()` API for cross-encoder reranking. Returns documents sorted by relevance score (0.0 - 1.0).
+The default GGUF Qwen3-Reranker uses node-llama-cpp's `createRankingContext()` and `rankAndSort()` API for cross-encoder reranking. ONNX rerank models are routed through the Provider layer and run via `@huggingface/transformers`. Returns documents sorted by relevance score (0.0 - 1.0).
 
 ### Qwen3 (Query Expansion)
 
