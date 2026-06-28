@@ -2091,10 +2091,8 @@ class LLMSession implements ILLMSession {
     return this.withOperation(async () => {
       const llm = this.manager.getLlamaCpp();
       const model = options?.model ?? llm.rerankModelName;
-      if (isOnnxRerankModel(model)) {
-        return new OnnxReranker(model).rerank(query, documents);
-      }
-      return llm.rerank(query, documents, { ...options, model });
+      const { getRerankProvider } = await import("./providers.js");
+      return getRerankProvider(model, llm).rerank(query, documents, { ...options, model });
     });
   }
 }

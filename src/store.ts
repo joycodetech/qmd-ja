@@ -34,11 +34,8 @@ import {
   type RerankDocument,
   type RerankResult,
   type ILLMSession,
-  isOnnxRerankModel,
-  OnnxReranker,
-  isOnnxEmbedModel,
-  OnnxEmbedder,
 } from "./llm.js";
+import { getEmbeddingProvider, getRerankProvider } from "./providers.js";
 import type {
   NamedCollection,
   Collection,
@@ -1673,9 +1670,8 @@ export async function generateEmbeddings(
 
   const embedModelUri = model;
 
-  // ONNX embed models do not require a llama.cpp session. Creating one here
-  // makes onnxe: URIs look like GGUF model paths and breaks `qmd embed`.
-  const runEmbedding = async (session: ILLMSession | null) => {
+  const runEmbedding = async (session: ILLMSession) => {
+    const embeddingProvider = getEmbeddingProvider(embedModelUri, session);
     let chunksEmbedded = 0;
     let bytesProcessed = 0;
     let totalChunks = 0;
@@ -1714,10 +1710,7 @@ export async function generateEmbeddings(
     const tryEmbedChunk = async (chunk: ChunkItem): Promise<boolean> => {
       try {
         const text = formatDocForEmbedding(chunk.text, chunk.title, embedModelUri);
-        // ONNX embed route (e.g. ruri-v3): bypass LLM session
-        const result = isOnnxEmbedModel(embedModelUri)
-          ? await getOrCreateOnnxEmbedder(embedModelUri).embed(text)
-          : await session!.embed(text, { model });
+        const result = await embeddingProvider.embed(text, { model });
         if (!result) {
           recordFailure(chunk, "embedding returned no vector");
           return false;
@@ -1779,7 +1772,7 @@ export async function generateEmbeddings(
           doc.path,
           options?.chunkStrategy,
           session?.signal,
-          !isOnnxEmbedModel(embedModelUri),
+          true,
         );
 
         for (let seq = 0; seq < chunks.length; seq++) {
@@ -1809,10 +1802,7 @@ export async function generateEmbeddings(
       if (!vectorTableInitialized) {
         const firstChunk = batchChunks[0]!;
         const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title, embedModelUri);
-        // ONNX embed route: bypass LLM session for dimensions probe
-        const firstResult = isOnnxEmbedModel(embedModelUri)
-          ? await getOrCreateOnnxEmbedder(embedModelUri).embed(firstText)
-          : await session!.embed(firstText, { model });
+        const firstResult = await embeddingProvider.embed(firstText, { model });
         if (!firstResult) {
           throw new Error("Failed to get embedding dimensions from first chunk");
         }
@@ -1846,10 +1836,7 @@ export async function generateEmbeddings(
         const texts = chunkBatch.map(chunk => formatDocForEmbedding(chunk.text, chunk.title, embedModelUri));
 
         try {
-          // ONNX embed route: sequential via OnnxEmbedder (no LLM session needed)
-          const embeddings = isOnnxEmbedModel(embedModelUri)
-            ? await Promise.all(texts.map(t => getOrCreateOnnxEmbedder(embedModelUri).embed(t)))
-            : await session!.embedBatch(texts, { model });
+          const embeddings = await embeddingProvider.embedBatch(texts, { model });
           for (let i = 0; i < chunkBatch.length; i++) {
             const chunk = chunkBatch[i]!;
             const embedding = embeddings[i];
@@ -1908,9 +1895,7 @@ export async function generateEmbeddings(
     return { chunksEmbedded, errors: activeErrorCount(), failures: failureList() };
   };
 
-  const result = isOnnxEmbedModel(embedModelUri)
-    ? await runEmbedding(null)
-    : await withLLMSessionForLlm(llm, runEmbedding, { maxDuration: 30 * 60 * 1000, name: 'generateEmbeddings' });
+  const result = await withLLMSessionForLlm(llm, runEmbedding, { maxDuration: 30 * 60 * 1000, name: 'generateEmbeddings' });
 
   return {
     docsProcessed: totalDocs,
@@ -3724,15 +3709,8 @@ export async function searchVec(db: Database, query: string, model: string, limi
 async function getEmbedding(text: string, model: string, isQuery: boolean, session?: ILLMSession, llmOverride?: LlamaCpp): Promise<number[] | null> {
   // Format text using the appropriate prompt template
   const formattedText = isQuery ? formatQueryForEmbedding(text, model) : formatDocForEmbedding(text, undefined, model);
-  // ONNX embed route (e.g. ruri-v3 via @huggingface/transformers)
-  if (isOnnxEmbedModel(model)) {
-    const onnxEmbedder = getOrCreateOnnxEmbedder(model);
-    const result = await onnxEmbedder.embed(formattedText);
-    return result?.embedding ?? null;
-  }
-  const result = session
-    ? await session.embed(formattedText, { model, isQuery })
-    : await (llmOverride ?? getDefaultLlamaCpp()).embed(formattedText, { model, isQuery });
+  const provider = getEmbeddingProvider(model, session ?? llmOverride);
+  const result = await provider.embed(formattedText, { model, isQuery });
   return result?.embedding || null;
 }
 
@@ -3928,22 +3906,6 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
 // Reranking
 // =============================================================================
 
-const _onnxRerankerInstances: Map<string, OnnxReranker> = new Map();
-
-function getOrCreateOnnxReranker(uri: string): OnnxReranker {
-  if (!_onnxRerankerInstances.has(uri)) {
-    _onnxRerankerInstances.set(uri, new OnnxReranker(uri));
-  }
-  return _onnxRerankerInstances.get(uri)!;
-}
-
-const _onnxEmbedderInstances: Map<string, OnnxEmbedder> = new Map();
-
-function getOrCreateOnnxEmbedder(uri: string): OnnxEmbedder {
-  if (!_onnxEmbedderInstances.has(uri))
-    _onnxEmbedderInstances.set(uri, new OnnxEmbedder(uri));
-  return _onnxEmbedderInstances.get(uri)!;
-}
 
 export async function rerank(query: string, documents: { file: string; text: string }[], model: string | undefined = undefined, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<{ file: string; score: number }[]> {
   const rerankModel = model ?? llmOverride?.rerankModelName ?? getDefaultLlamaCpp().rerankModelName ?? DEFAULT_RERANK_MODEL;
@@ -3972,17 +3934,8 @@ export async function rerank(query: string, documents: { file: string; text: str
   // Rerank uncached documents
   if (uncachedDocsByChunk.size > 0) {
     const uncachedDocs = [...uncachedDocsByChunk.values()];
-    let rerankResult: RerankResult;
-
-    if (isOnnxRerankModel(rerankModel)) {
-      // ONNX ルート（hotchpotch など ModernBERT ベースの日本語 Reranker）
-      const onnxReranker = getOrCreateOnnxReranker(rerankModel);
-      rerankResult = await onnxReranker.rerank(rerankQuery, uncachedDocs);
-    } else {
-      // GGUF ルート（既存 node-llama-cpp）
-      const llm = llmOverride ?? getDefaultLlamaCpp();
-      rerankResult = await llm.rerank(rerankQuery, uncachedDocs, { model: rerankModel });
-    }
+    const rerankProvider = getRerankProvider(rerankModel, llmOverride);
+    const rerankResult = await rerankProvider.rerank(rerankQuery, uncachedDocs, { model: rerankModel });
 
     // Cache results by chunk text so identical chunks across files are scored once.
     const textByFile = new Map(uncachedDocs.map(d => [d.file, d.text]));
@@ -4785,9 +4738,8 @@ export async function hybridQuery(
     const textsToEmbed = vecQueries.map(q => formatQueryForEmbedding(q.text, embedModel));
     hooks?.onEmbedStart?.(textsToEmbed.length);
     const embedStart = Date.now();
-    const embeddings = isOnnxEmbedModel(embedModel)
-      ? await Promise.all(textsToEmbed.map(text => getOrCreateOnnxEmbedder(embedModel).embed(text)))
-      : await llm.embedBatch(textsToEmbed);
+    const provider = getEmbeddingProvider(embedModel, llm);
+    const embeddings = await provider.embedBatch(textsToEmbed);
     hooks?.onEmbedDone?.(Date.now() - embedStart);
 
     // Run sqlite-vec lookups with pre-computed embeddings
@@ -5173,9 +5125,8 @@ export async function structuredSearch(
       const textsToEmbed = vecSearches.map(s => formatQueryForEmbedding(s.query, embedModel));
       hooks?.onEmbedStart?.(textsToEmbed.length);
       const embedStart = Date.now();
-      const embeddings = isOnnxEmbedModel(embedModel)
-        ? await Promise.all(textsToEmbed.map(text => getOrCreateOnnxEmbedder(embedModel).embed(text)))
-        : await llm.embedBatch(textsToEmbed);
+      const provider = getEmbeddingProvider(embedModel, llm);
+      const embeddings = await provider.embedBatch(textsToEmbed);
       hooks?.onEmbedDone?.(Date.now() - embedStart);
 
       for (let i = 0; i < vecSearches.length; i++) {
