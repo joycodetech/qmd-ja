@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [2.6.3-ja.1] - 2026-06-29
+
+### Changed
+
+- Synced with upstream [tobi/qmd v2.6.3](https://github.com/tobi/qmd/releases/tag/v2.6.3):
+  - qmd embed --timeout overrides the 30-minute embed session cap
+  - CJK FTS rebuild stream-batches to prevent OOM on large indexes
+  - Concurrent store initialization is safe under parallel opens
+  - SQLite busy timeout raised to 120s; QMD_SQLITE_BUSY_TIMEOUT exposed
+  - Multi-get default maxBytes increased
+- README restructured as qmd-ja native documentation:
+  - New Japanese Optimization section: Vaporetto WASM tokenizer and recommended
+    model configuration (ruri-v3, qmd-query-expansion-ja, japanese-reranker-xsmall-v2)
+  - Architecture diagram annotated with qmd-ja tokenizer and model differences
+  - generate model updated to adsholoko/qmd-query-expansion-ja in Japanese config examples
+
+### Added (qmd-ja)
+
+- Test suite expanded: Vaporetto tokenization, CJK FTS, concurrent store
+  initialization, ONNX provider routing, and bin wrapper behavior
+
 ## [2.6.3] - 2026-06-24
 
 ### Added
