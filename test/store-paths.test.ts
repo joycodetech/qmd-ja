@@ -327,7 +327,7 @@ describe("Path utilities - Cross-platform support", () => {
   // resolve - Git Bash style paths
   // ===========================================================================
   
-  describe("resolve - Git Bash style paths", () => {
+  describe.skipIf(process.platform !== "win32")("resolve - Git Bash style paths", () => {
     test("Git Bash to Windows conversion", () => {
       expect(resolve("/c/Users/name")).toBe("C:/Users/name");
       expect(resolve("/C/Users/name")).toBe("C:/Users/name");
