@@ -7,11 +7,10 @@
 | | tobi/qmd (upstream) | joycodetech/qmd-ja |
 |---|---|---|
 | CJK tokenizer | Unigram (character-level) | **Vaporetto WASM** (morphological) |
-| `ナレッジベース` → FTS | `ナレッジベ ー ス` ❌ | `ナレッジベース` ✅ |
-| `プロンプトコンパイラ` → FTS | `プ ロ ン プ ト...` (17 tokens) | `プロンプトコンパイラ` (1 token) ✅ |
-| Init time | 0 ms | 16 ms (one-time) |
-| Tokenize speed | 3 µs/query | 5 µs/query |
 | `ー` in CJK_RUN_PATTERN | Missing (bug) | Fixed ✅ |
+| Default embed model | `embeddinggemma-300M` (English) | `mochiya98/ruri-v3-310m-onnx` (Japanese) |
+| Default generate model | `qmd-query-expansion-1.7B` (English) | `adsholoko/qmd-query-expansion-ja` (Japanese) |
+| Default rerank model | `Qwen3-Reranker-0.6B` (multilingual) | `hotchpotch/japanese-reranker-xsmall-v2` (Japanese) |
 
 ### Installation
 
@@ -19,20 +18,65 @@
 npm install -g @joycodetech/qmd-ja
 ```
 
-> Most features and MCP integration follow [tobi/qmd](https://github.com/tobi/qmd).
-> In qmd-ja, use the `qmd-ja` CLI command and the `@joycodetech/qmd-ja` package.
+> Based on [tobi/qmd](https://github.com/tobi/qmd) (MIT). Use `qmd-ja` as the CLI command and `@joycodetech/qmd-ja` as the package name.
 
 ---
 
-# QMD - Query Markup Documents
+## qmd-ja — On-Device Search Engine
 
-An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.
+An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for agentic workflows.
 
-QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking. qmd-ja can run GGUF models via node-llama-cpp and ONNX embedding/rerank models via @huggingface/transformers.
+qmd-ja combines BM25 full-text search, vector semantic search, and LLM re-ranking — with Japanese morphological tokenization and Japanese-optimized models replacing the upstream defaults.
 
 ![QMD Architecture](assets/qmd-architecture.png)
 
-You can read more about QMD's progress in the [CHANGELOG](CHANGELOG.md).
+> **qmd-ja note:** The architecture diagram reflects the upstream pipeline. In qmd-ja, the BM25 tokenizer is replaced with Vaporetto WASM morphological analysis, and the default models are replaced with Japanese-optimized alternatives. See [Japanese Optimization](#japanese-optimization) for details.
+
+You can read more about changes in the [CHANGELOG](CHANGELOG.md).
+
+## Japanese Optimization
+
+qmd-ja replaces two components of the upstream pipeline for Japanese-heavy corpora.
+
+### Tokenizer — Vaporetto WASM
+
+The BM25 full-text search engine uses Vaporetto WASM morphological analysis instead of character-level unigram tokenization. Compound words remain intact as single tokens:
+
+| | upstream | qmd-ja |
+|---|---|---|
+| `ナレッジベース` | `ナレッジベ ー ス` ❌ | `ナレッジベース` ✅ |
+| `プロンプトコンパイラ` | 17 tokens ❌ | 1 token ✅ |
+| Startup overhead | 0 ms | 16 ms (one-time) |
+| Throughput | 3 µs/query | 5 µs/query |
+
+### Recommended Models for Japanese Corpora
+
+Place the following in your `index.yml` (or `.qmd/index.yml` for project-local indexes):
+
+```yaml
+models:
+  embed: onnxe:mochiya98/ruri-v3-310m-onnx/q8
+  generate: hf:adsholoko/qmd-query-expansion-ja/Qwen3-1.7B.Q4_K_M.gguf
+  rerank: onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2
+```
+
+| Role | Model | Notes |
+|------|-------|-------|
+| embed | `mochiya98/ruri-v3-310m-onnx` | Japanese ONNX embedding model |
+| generate | `adsholoko/qmd-query-expansion-ja` | Japanese query expansion, fine-tuned by [adsholoko](https://huggingface.co/adsholoko) |
+| rerank | `hotchpotch/japanese-reranker-xsmall-v2` | Japanese ONNX reranker |
+
+After changing models:
+
+```sh
+qmd-ja pull      # download GGUF models
+qmd-ja doctor    # verify setup
+qmd-ja embed -f  # re-embed with the new embedding model
+```
+
+> The built-in defaults target English corpora. For Japanese-only or Japanese-heavy corpora, the configuration above produces significantly better results.
+
+---
 
 ## Quick Start
 
@@ -561,7 +605,7 @@ For Japanese-heavy corpora, this configuration uses ONNX for embedding and reran
 ```yaml
 models:
   embed: onnxe:mochiya98/ruri-v3-310m-onnx/q8
-  generate: hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf
+  generate: hf:adsholoko/qmd-query-expansion-ja/Qwen3-1.7B.Q4_K_M.gguf
   rerank: onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2
 ```
 
@@ -1266,7 +1310,7 @@ Example index config (qmd-ja default — ONNX models for Japanese):
 ```yaml
 models:
   embed: onnxe:mochiya98/ruri-v3-310m-onnx/q8
-  generate: hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf
+  generate: hf:adsholoko/qmd-query-expansion-ja/Qwen3-1.7B.Q4_K_M.gguf
   rerank: onnx:hotchpotch/japanese-reranker-xsmall-v2/model_qint8_avx2
 ```
 
