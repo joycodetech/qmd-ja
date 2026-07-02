@@ -153,7 +153,7 @@ async function buildInstructions(store: QMDStore): Promise<string> {
   lines.push("");
   lines.push("Retrieval:");
   lines.push("  - `get` — single document by path or docid (#abc123). Supports a line-range suffix: `file.md:100` (from line 100) or `file.md:100:40` (40 lines from line 100).");
-  lines.push("  - `multi_get` — batch retrieve by glob (`journals/2025-05*.md`) or comma-separated list.");
+  lines.push("  - `multi_get` — batch retrieve by glob (`journals/2025-05*.md`), comma-separated list, or docids (#abc123).");
 
   // --- Non-obvious things that prevent mistakes ---
   lines.push("");
@@ -507,10 +507,10 @@ Intent-aware lex (C++ performance, not sports):
     "multi_get",
     {
       title: "Multi-Get Documents",
-      description: "Retrieve multiple documents by glob pattern (e.g., 'journals/2025-05*.md') or comma-separated list. Skips files larger than maxBytes.",
+      description: "Retrieve multiple documents by glob pattern (e.g., 'journals/2025-05*.md'), comma-separated list, or docids. Skips files larger than maxBytes.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
-        pattern: z.string().describe("Glob pattern or comma-separated list of file paths"),
+        pattern: z.string().describe("Glob pattern, docid, or comma-separated list of file paths/docids"),
         maxLines: z.number().optional().describe("Maximum lines per file"),
         maxBytes: z.number().optional().default(DEFAULT_MULTI_GET_MAX_BYTES).describe("Skip files larger than this (default: 65536 = 64KB)"),
         lineNumbers: z.boolean().optional().default(true).describe("Add line numbers to output (format: 'N: content'). On by default; set false for raw content."),

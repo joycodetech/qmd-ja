@@ -1973,6 +1973,59 @@ describe("Document Retrieval", () => {
       await cleanupTestDb(store);
     });
 
+    test("findDocuments finds by docid", async () => {
+      const store = await createTestStore();
+      const collectionName = await createTestCollection();
+
+      await insertTestDocument(store.db, collectionName, {
+        name: "docid-doc",
+        filepath: "/path/docid-doc.md",
+        displayPath: "docid-doc.md",
+        body: "# Docid Doc\n\nThe content",
+      });
+
+      const doc = store.findDocument("docid-doc.md");
+      expect("error" in doc).toBe(false);
+      if (!("error" in doc)) {
+        const { docs, errors } = store.findDocuments(`#${doc.docid}`);
+        expect(errors).toHaveLength(0);
+        expect(docs).toHaveLength(1);
+        expect(docs[0]!.doc.docid).toBe(doc.docid);
+      }
+
+      await cleanupTestDb(store);
+    });
+
+    test("findDocuments finds docids in a comma-separated list", async () => {
+      const store = await createTestStore();
+      const collectionName = await createTestCollection();
+
+      await insertTestDocument(store.db, collectionName, {
+        name: "doc1",
+        filepath: "/path/doc1.md",
+        displayPath: "doc1.md",
+      });
+      await insertTestDocument(store.db, collectionName, {
+        name: "doc2",
+        filepath: "/path/doc2.md",
+        displayPath: "doc2.md",
+      });
+
+      const doc1 = store.findDocument("doc1.md");
+      expect("error" in doc1).toBe(false);
+      if (!("error" in doc1)) {
+        const { docs, errors } = store.findDocuments(`#${doc1.docid}, doc2.md`);
+        expect(errors).toHaveLength(0);
+        expect(docs).toHaveLength(2);
+        expect(docs.map((result) => result.doc.displayPath)).toEqual([
+          `${collectionName}/doc1.md`,
+          `${collectionName}/doc2.md`,
+        ]);
+      }
+
+      await cleanupTestDb(store);
+    });
+
     test("findDocuments reports errors for not found files", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();

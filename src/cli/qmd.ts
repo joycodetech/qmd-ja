@@ -22,6 +22,7 @@ import {
   renameCollection,
   findSimilarFiles,
   findDocument,
+  findDocumentByDocid,
   matchFilesByGlob,
   getHashesNeedingEmbedding,
   clearAllEmbeddings,
@@ -40,6 +41,7 @@ import {
   parseVirtualPath,
   buildVirtualPath,
   isVirtualPath,
+  isDocid,
   resolveVirtualPath,
   toVirtualPath,
   insertContent,
@@ -1084,19 +1086,24 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
 
   // Check if it's a comma-separated list or a glob pattern
   const isCommaSeparated = pattern.includes(',') && !pattern.includes('*') && !pattern.includes('?') && !pattern.includes('{');
+  const isSingleDocid = isDocid(pattern);
 
   let files: { filepath: string; displayPath: string; bodyLength: number; collection?: string; path?: string }[];
 
-  if (isCommaSeparated) {
+  if (isCommaSeparated || isSingleDocid) {
     // Comma-separated list of files (can be virtual paths or relative paths)
-    const names = pattern.split(',').map(s => s.trim()).filter(Boolean);
+    const names = isCommaSeparated
+      ? pattern.split(',').map(s => s.trim()).filter(Boolean)
+      : [pattern.trim()].filter(Boolean);
     files = [];
     for (const name of names) {
       let doc: { virtual_path: string; body_length: number; collection: string; path: string } | null = null;
+      const docidMatch = isDocid(name) ? findDocumentByDocid(db, name) : null;
+      const lookupName = docidMatch?.filepath ?? name;
 
       // Handle virtual paths
-      if (isVirtualPath(name)) {
-        const parsed = parseVirtualPath(name);
+      if (isVirtualPath(lookupName)) {
+        const parsed = parseVirtualPath(lookupName);
         if (parsed) {
           // Try exact match on collection + path
           doc = db.prepare(`
@@ -1110,7 +1117,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
             WHERE d.collection = ? AND d.path = ? AND d.active = 1
           `).get(parsed.collectionName, parsed.path) as typeof doc;
         }
-      } else {
+      } else if (!docidMatch) {
         // Try exact match on path
         doc = db.prepare(`
           SELECT
@@ -1122,7 +1129,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
           JOIN content ON content.hash = d.hash
           WHERE d.path = ? AND d.active = 1
           LIMIT 1
-        `).get(name) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
+        `).get(lookupName) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
 
         // Try suffix match
         if (!doc) {
@@ -1136,7 +1143,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
             JOIN content ON content.hash = d.hash
             WHERE d.path LIKE ? AND d.active = 1
             LIMIT 1
-          `).get(`%${name}`) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
+          `).get(`%${lookupName}`) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
         }
       }
 
@@ -1151,6 +1158,10 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
       } else {
         console.error(`File not found: ${name}`);
       }
+    }
+    if (isSingleDocid && files.length === 0) {
+      closeDb();
+      process.exit(1);
     }
   } else {
     // Glob pattern - matchFilesByGlob now returns virtual paths

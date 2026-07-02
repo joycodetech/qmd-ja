@@ -4445,6 +4445,7 @@ export function findDocuments(
   options: { includeBody?: boolean; maxBytes?: number } = {}
 ): { docs: MultiGetResult[]; errors: string[] } {
   const isCommaSeparated = pattern.includes(',') && !pattern.includes('*') && !pattern.includes('?') && !pattern.includes('{');
+  const isSingleDocid = isDocid(pattern);
   const errors: string[] = [];
   const maxBytes = options.maxBytes ?? DEFAULT_MULTI_GET_MAX_BYTES;
 
@@ -4462,24 +4463,28 @@ export function findDocuments(
 
   let fileRows: DbDocRow[];
 
-  if (isCommaSeparated) {
-    const names = pattern.split(',').map(s => s.trim()).filter(Boolean);
+  if (isCommaSeparated || isSingleDocid) {
+    const names = isCommaSeparated
+      ? pattern.split(',').map(s => s.trim()).filter(Boolean)
+      : [pattern.trim()].filter(Boolean);
     fileRows = [];
     for (const name of names) {
+      const docidMatch = isDocid(name) ? findDocumentByDocid(db, name) : null;
+      const lookupName = docidMatch?.filepath ?? name;
       let doc = db.prepare(`
         SELECT ${selectCols}
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE 'qmd://' || d.collection || '/' || d.path = ? AND d.active = 1
-      `).get(name) as DbDocRow | null;
-      if (!doc) {
+      `).get(lookupName) as DbDocRow | null;
+      if (!doc && !docidMatch) {
         doc = db.prepare(`
           SELECT ${selectCols}
           FROM documents d
           JOIN content ON content.hash = d.hash
           WHERE 'qmd://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
           LIMIT 1
-        `).get(`%${name}`) as DbDocRow | null;
+        `).get(`%${lookupName}`) as DbDocRow | null;
       }
       if (doc) {
         fileRows.push(doc);

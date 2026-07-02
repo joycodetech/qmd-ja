@@ -922,6 +922,46 @@ describe("CLI Multi-Get Command", () => {
     }
   });
 
+  test("retrieves a document by docid", async () => {
+    const lookup = await runQmd(["multi-get", "README.md", "--json"], { dbPath: localDbPath });
+    expect(lookup.exitCode).toBe(0);
+    const [entry] = JSON.parse(lookup.stdout);
+
+    const { stdout, stderr, exitCode } = await runQmd(["multi-get", entry.docid, "--json"], { dbPath: localDbPath });
+    expect(exitCode).toBe(0);
+    expect(stderr).not.toContain("No files matched pattern");
+
+    const parsed = JSON.parse(stdout);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].docid).toBe(entry.docid);
+    expect(parsed[0].body).toContain("Test Project");
+  });
+
+  test("fails for a missing single docid", async () => {
+    const { stdout, stderr, exitCode } = await runQmd(["multi-get", "#000000", "--json"], { dbPath: localDbPath });
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("File not found: #000000");
+  });
+
+  test("retrieves docids in comma-separated lists", async () => {
+    const lookup = await runQmd(["multi-get", "README.md", "--json"], { dbPath: localDbPath });
+    expect(lookup.exitCode).toBe(0);
+    const [entry] = JSON.parse(lookup.stdout);
+
+    const { stdout, exitCode } = await runQmd([
+      "multi-get",
+      `${entry.docid},notes/meeting.md`,
+      "--json",
+    ], { dbPath: localDbPath });
+    expect(exitCode).toBe(0);
+
+    const parsed = JSON.parse(stdout);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0].docid).toBe(entry.docid);
+    expect(parsed[1].file).toBe("qmd://fixtures/notes/meeting.md");
+  });
+
   test("shows line numbers by default and --no-line-numbers disables them", async () => {
     const withNums = await runQmd(["multi-get", "README.md"], { dbPath: localDbPath });
     expect(withNums.exitCode).toBe(0);
