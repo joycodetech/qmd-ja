@@ -10,6 +10,7 @@ import type {
   LlamaEmbeddingContext,
   Token as LlamaToken,
 } from "node-llama-cpp";
+import { logQueryEvent } from "./logger.js";
 
 type StdoutChunk = string | Uint8Array;
 type WriteCallback = (err?: Error | null) => void;
@@ -227,7 +228,7 @@ export type LLMSessionOptions = {
 export interface ILLMSession {
   embed(text: string, options?: EmbedOptions): Promise<EmbeddingResult | null>;
   embedBatch(texts: string[], options?: EmbedOptions): Promise<(EmbeddingResult | null)[]>;
-  expandQuery(query: string, options?: { context?: string; includeLexical?: boolean }): Promise<Queryable[]>;
+  expandQuery(query: string, options?: { context?: string; includeLexical?: boolean; intent?: string; callId?: string }): Promise<Queryable[]>;
   rerank(query: string, documents: RerankDocument[], options?: RerankOptions): Promise<RerankResult>;
   /** Whether this session is still valid (not released or aborted) */
   readonly isValid: boolean;
@@ -567,7 +568,7 @@ export interface LLM {
    * Expand a search query into multiple variations for different backends.
    * Returns a list of Queryable objects.
    */
-  expandQuery(query: string, options?: { context?: string, includeLexical?: boolean }): Promise<Queryable[]>;
+  expandQuery(query: string, options?: { context?: string; includeLexical?: boolean; intent?: string; callId?: string }): Promise<Queryable[]>;
 
   /**
    * Rerank documents by relevance to a query
@@ -1480,13 +1481,21 @@ export class LlamaCpp implements LLM {
   // High-level abstractions
   // ==========================================================================
 
-  async expandQuery(query: string, options: { context?: string, includeLexical?: boolean, intent?: string } = {}): Promise<Queryable[]> {
+  async expandQuery(query: string, options: { context?: string; includeLexical?: boolean; intent?: string; callId?: string } = {}): Promise<Queryable[]> {
     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
-    const llama = await this.ensureLlama();
-    await this.ensureGenerateModel();
+    const callId = options.callId;
+    const modelStart = Date.now();
+    if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.model.start");
+    let llama: Llama;
+    try {
+      llama = await this.ensureLlama();
+      await this.ensureGenerateModel();
+    } finally {
+      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.model.end", { elapsedMs: Date.now() - modelStart });
+    }
 
     const includeLexical = options.includeLexical ?? true;
     const context = options.context;
@@ -1501,19 +1510,32 @@ export class LlamaCpp implements LLM {
     // instead of propagating and failing the caller's operation.
     let genContext: Awaited<ReturnType<LlamaModel["createContext"]>> | undefined;
     try {
-      const grammar = await llama.createGrammar({
-        grammar: `
-        root ::= line+
-        line ::= type ": " content "\\n"
-        type ::= "lex" | "vec" | "hyde"
-        content ::= [^\\n]+
-      `
-      });
+      const grammarStart = Date.now();
+      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.grammar.start");
+      let grammar;
+      try {
+        grammar = await llama.createGrammar({
+          grammar: `
+          root ::= line+
+          line ::= type ": " content "\\n"
+          type ::= "lex" | "vec" | "hyde"
+          content ::= [^\\n]+
+        `
+        });
+      } finally {
+        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.grammar.end", { elapsedMs: Date.now() - grammarStart });
+      }
 
       // Create a bounded context for expansion to prevent large default VRAM allocations.
-      genContext = await this.generateModel!.createContext({
-        contextSize: this.expandContextSize,
-      });
+      const contextStart = Date.now();
+      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.start");
+      try {
+        genContext = await this.generateModel!.createContext({
+          contextSize: this.expandContextSize,
+        });
+      } finally {
+        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.end", { elapsedMs: Date.now() - contextStart });
+      }
       const sequence = genContext.getSequence();
       const { LlamaChatSession } = await loadNodeLlamaCpp();
       const session = new LlamaChatSession({ contextSequence: sequence });
@@ -1521,17 +1543,24 @@ export class LlamaCpp implements LLM {
       // Qwen3 recommended settings for non-thinking mode:
       // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
-      const result = await session.prompt(prompt, {
-        grammar,
-        maxTokens: 600,
-        temperature: 0.7,
-        topK: 20,
-        topP: 0.8,
-        repeatPenalty: {
-          lastTokens: 64,
-          presencePenalty: 0.5,
-        },
-      });
+      const promptStart = Date.now();
+      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.start");
+      let result: string;
+      try {
+        result = await session.prompt(prompt, {
+          grammar,
+          maxTokens: 600,
+          temperature: 0.7,
+          topK: 20,
+          topP: 0.8,
+          repeatPenalty: {
+            lastTokens: 64,
+            presencePenalty: 0.5,
+          },
+        });
+      } finally {
+        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.end", { elapsedMs: Date.now() - promptStart });
+      }
 
       const lines = result.trim().split("\n");
       const queryLower = query.toLowerCase();
@@ -2092,7 +2121,7 @@ class LLMSession implements ILLMSession {
 
   async expandQuery(
     query: string,
-    options?: { context?: string; includeLexical?: boolean }
+    options?: { context?: string; includeLexical?: boolean; intent?: string; callId?: string }
   ): Promise<Queryable[]> {
     return this.withOperation(() => this.manager.getLlamaCpp().expandQuery(query, options));
   }

@@ -31,6 +31,7 @@ import {
 } from "../index.js";
 import { getConfigPath } from "../collections.js";
 import { enableProductionMode } from "../store.js";
+import { logQueryEvent, newCallId } from "../logger.js";
 
 // =============================================================================
 // Types for structured content
@@ -326,63 +327,98 @@ Intent-aware lex (C++ performance, not sports):
       },
     },
     async ({ query, searches, limit, minScore, candidateLimit, collections, intent, rerank }) => {
+      const callId = newCallId();
+      const queryStart = Date.now();
+      logQueryEvent(callId, "info", "query.start", {
+        query,
+        searches,
+        limit,
+        minScore,
+        candidateLimit,
+        collections,
+        intent,
+        rerank,
+      });
+
       // Require exactly one of `query` (plain text, auto-expanded) or `searches` (typed sub-queries).
       if (!query && (!searches || searches.length === 0)) {
+        logQueryEvent(callId, "error", "query.error", {
+          elapsedMs: Date.now() - queryStart,
+          error: "provide either query or searches",
+        });
         return {
           content: [{ type: "text" as const, text: "Error: provide either 'query' (plain text) or 'searches' (typed sub-queries)" }],
           isError: true,
         };
       }
       if (query && searches && searches.length > 0) {
+        logQueryEvent(callId, "error", "query.error", {
+          elapsedMs: Date.now() - queryStart,
+          error: "query and searches are mutually exclusive",
+        });
         return {
           content: [{ type: "text" as const, text: "Error: 'query' and 'searches' are mutually exclusive; provide only one" }],
           isError: true,
         };
       }
 
-      // Use default collections if none specified
-      const effectiveCollections = collections ?? defaultCollectionNames;
+      try {
+        // Use default collections if none specified
+        const effectiveCollections = collections ?? defaultCollectionNames;
 
-      // Plain `query` is auto-expanded by the SDK (expand → fuse → rerank);
-      // `searches` runs the caller's typed sub-queries directly.
-      const searchOptions = query
-        ? { query }
-        : { queries: (searches ?? []).map(s => ({ type: s.type, query: s.query })) };
+        // Plain `query` is auto-expanded by the SDK (expand → fuse → rerank);
+        // `searches` runs the caller's typed sub-queries directly.
+        const searchOptions = query
+          ? { query }
+          : { queries: (searches ?? []).map(s => ({ type: s.type, query: s.query })) };
 
-      const results = await store.search({
-        ...searchOptions,
-        collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
-        limit,
-        minScore,
-        candidateLimit,
-        rerank,
-        intent,
-      });
+        const results = await store.search({
+          ...searchOptions,
+          collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+          limit,
+          minScore,
+          candidateLimit,
+          rerank,
+          intent,
+          callId,
+        });
 
-      // Use the plain query, or the first lex/vec sub-query, for snippet extraction
-      const primaryQuery = query
-        || searches?.find(s => s.type === 'lex')?.query
-        || searches?.find(s => s.type === 'vec')?.query
-        || searches?.[0]?.query
-        || "";
+        // Use the plain query, or the first lex/vec sub-query, for snippet extraction
+        const primaryQuery = query
+          || searches?.find(s => s.type === 'lex')?.query
+          || searches?.find(s => s.type === 'vec')?.query
+          || searches?.[0]?.query
+          || "";
 
-      const filtered: SearchResultItem[] = results.map(r => {
-        const { line, snippet } = extractSnippet(r.body, primaryQuery, 300, r.bestChunkPos, r.bestChunk.length, intent);
+        const filtered: SearchResultItem[] = results.map(r => {
+          const { line, snippet } = extractSnippet(r.body, primaryQuery, 300, r.bestChunkPos, r.bestChunk.length, intent);
+          return {
+            docid: `#${r.docid}`,
+            file: r.displayPath,
+            title: r.title,
+            score: Math.round(r.score * 100) / 100,
+            context: r.context,
+            line,
+            snippet: addLineNumbers(snippet, line),
+          };
+        });
+
+        logQueryEvent(callId, "info", "query.end", {
+          elapsedMs: Date.now() - queryStart,
+          resultCount: filtered.length,
+        });
+
         return {
-          docid: `#${r.docid}`,
-          file: r.displayPath,
-          title: r.title,
-          score: Math.round(r.score * 100) / 100,
-          context: r.context,
-          line,
-          snippet: addLineNumbers(snippet, line),
+          content: [{ type: "text", text: formatSearchSummary(filtered, primaryQuery) }],
+          structuredContent: { results: filtered },
         };
-      });
-
-      return {
-        content: [{ type: "text", text: formatSearchSummary(filtered, primaryQuery) }],
-        structuredContent: { results: filtered },
-      };
+      } catch (error) {
+        logQueryEvent(callId, "error", "query.error", {
+          elapsedMs: Date.now() - queryStart,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
     }
   );
 

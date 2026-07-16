@@ -68,6 +68,7 @@ import {
 import {
   LlamaCpp,
 } from "./llm.js";
+import { initLogger } from "./logger.js";
 import {
   setConfigSource,
   loadConfig,
@@ -170,6 +171,8 @@ export interface SearchOptions {
   explain?: boolean;
   /** Chunk strategy: "auto" (default, uses AST for code files) or "regex" (legacy) */
   chunkStrategy?: ChunkStrategy;
+  /** Correlation ID for structured query logs */
+  callId?: string;
 }
 
 /**
@@ -372,6 +375,8 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
   }
   // else: DB-only mode — no external config, use existing store_collections
 
+  initLogger(config);
+
   // Create a per-store LlamaCpp instance — lazy-loads models on first use,
   // auto-unloads after 5 min inactivity to free VRAM.
   const llm = new LlamaCpp({
@@ -423,6 +428,7 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
         candidateLimit: opts.candidateLimit,
         skipRerank,
         chunkStrategy: opts.chunkStrategy,
+        callId: opts.callId,
       });
     },
     searchLex: async (q, opts) => internal.searchFTS(q, opts?.limit, opts?.collection),

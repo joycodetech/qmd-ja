@@ -36,6 +36,7 @@ import {
   type ILLMSession,
 } from "./llm.js";
 import { getEmbeddingProvider, getRerankProvider, shouldUseLlamaCppTokenizerForEmbedding } from "./providers.js";
+import { logQueryEvent } from "./logger.js";
 import type {
   NamedCollection,
   Collection,
@@ -1378,7 +1379,7 @@ export type Store = {
   searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
-  expandQuery: (query: string, model?: string, intent?: string) => Promise<ExpandedQuery[]>;
+  expandQuery: (query: string, model?: string, intent?: string, callId?: string) => Promise<ExpandedQuery[]>;
   rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => Promise<{ file: string; score: number }[]>;
 
   // Document retrieval
@@ -2063,7 +2064,7 @@ export function createStore(dbPath?: string): Store {
     searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
 
     // Query expansion & reranking
-    expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model ?? store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL, db, intent, store.llm),
+    expandQuery: (query: string, model?: string, intent?: string, callId?: string) => expandQuery(query, model ?? store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL, db, intent, store.llm, callId),
     rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => rerank(query, documents, model ?? store.llm?.rerankModelName, db, intent, store.llm),
 
     // Document retrieval
@@ -3979,7 +3980,7 @@ function removeIncompleteEmbeddings(db: Database, expectedChunksByHash: Map<stri
 // Query expansion
 // =============================================================================
 
-export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<ExpandedQuery[]> {
+export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp, callId?: string): Promise<ExpandedQuery[]> {
   // Check cache first — stored as JSON preserving types
   const cacheKey = getCacheKey("expandQuery", { query, model, ...(intent && { intent }) });
   const cached = getCachedResult(db, cacheKey);
@@ -3990,8 +3991,10 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
       const rows = parsed as Array<Record<string, unknown>>;
       // Migrate old cache format: { type, text } → { type, query }
       if (rows.length > 0 && typeof rows[0]?.query === "string") {
+        if (callId) logQueryEvent(callId, "debug", "expandQuery.cacheHit", { resultCount: rows.length });
         return rows.map((r) => ({ type: r.type as ExpandedQuery["type"], query: String(r.query) }));
       } else if (rows.length > 0 && typeof rows[0]?.text === "string") {
+        if (callId) logQueryEvent(callId, "debug", "expandQuery.cacheHit", { resultCount: rows.length, legacyFormat: true });
         return rows.map((r) => ({ type: r.type as ExpandedQuery["type"], query: String(r.text) }));
       }
     } catch {
@@ -3999,9 +4002,18 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
     }
   }
 
+  if (callId) logQueryEvent(callId, "debug", "expandQuery.cacheMiss");
+
   const llm = llmOverride ?? getDefaultLlamaCpp();
   // Note: LlamaCpp uses hardcoded model, model parameter is ignored
-  const results = await llm.expandQuery(query, { intent });
+  const llmStart = Date.now();
+  if (callId) logQueryEvent(callId, "debug", "expandQuery.llm.start");
+  let results;
+  try {
+    results = await llm.expandQuery(query, { intent, callId });
+  } finally {
+    if (callId) logQueryEvent(callId, "debug", "expandQuery.llm.end", { elapsedMs: Date.now() - llmStart });
+  }
 
   // Map Queryable[] → ExpandedQuery[] (same shape, decoupled from llm.ts internals).
   // Filter out entries that duplicate the original query text.
@@ -4771,6 +4783,7 @@ export interface HybridQueryOptions {
   skipRerank?: boolean;     // skip LLM reranking, use only RRF scores
   chunkStrategy?: ChunkStrategy;
   hooks?: SearchHooks;
+  callId?: string;
 }
 
 export interface HybridQueryResult {
@@ -4833,6 +4846,7 @@ export async function hybridQuery(
   const intent = options?.intent;
   const skipRerank = options?.skipRerank ?? false;
   const hooks = options?.hooks;
+  const callId = options?.callId;
 
   const rankedLists: RankedResult[][] = [];
   const rankedListMeta: RankedListMeta[] = [];
@@ -4846,7 +4860,14 @@ export async function hybridQuery(
   // match may not be what the caller wants (e.g. "performance" with intent
   // "web page load times" should NOT shortcut to a sports-performance doc).
   // Pass collection directly into FTS query (filter at SQL level, not post-hoc)
+  const lexProbeStart = Date.now();
+  if (callId) logQueryEvent(callId, "debug", "hybridQuery.lex.start", { stage: "probe" });
   const initialFts = store.searchFTS(query, 20, collection);
+  if (callId) logQueryEvent(callId, "debug", "hybridQuery.lex.end", {
+    stage: "probe",
+    elapsedMs: Date.now() - lexProbeStart,
+    resultCount: initialFts.length,
+  });
   const topScore = initialFts[0]?.score ?? 0;
   const secondScore = initialFts[1]?.score ?? 0;
   const hasStrongSignal = !intent && initialFts.length > 0
@@ -4858,11 +4879,18 @@ export async function hybridQuery(
   // Step 2: Expand query (or skip if strong signal)
   hooks?.onExpandStart?.();
   const expandStart = Date.now();
+  if (callId) logQueryEvent(callId, "debug", "hybridQuery.expand.start", { skipped: hasStrongSignal });
   const expanded = hasStrongSignal
     ? []
-    : await store.expandQuery(query, undefined, intent);
+    : await store.expandQuery(query, undefined, intent, callId);
 
-  hooks?.onExpand?.(query, expanded, Date.now() - expandStart);
+  const expandElapsedMs = Date.now() - expandStart;
+  if (callId) logQueryEvent(callId, "debug", "hybridQuery.expand.end", {
+    elapsedMs: expandElapsedMs,
+    resultCount: expanded.length,
+    skipped: hasStrongSignal,
+  });
+  hooks?.onExpand?.(query, expanded, expandElapsedMs);
 
   // Seed with initial FTS results (avoid re-running original query FTS)
   if (initialFts.length > 0) {
@@ -4881,6 +4909,9 @@ export async function hybridQuery(
   // sqlite-vec lookups with pre-computed embeddings.
 
   // 3a: Run FTS for all lex expansions right away (no LLM needed)
+  const lexStart = Date.now();
+  const lexQueries = expanded.filter(q => q.type === "lex");
+  if (callId) logQueryEvent(callId, "debug", "hybridQuery.lex.start", { stage: "expanded", queryCount: lexQueries.length });
   for (const q of expanded) {
     if (q.type === 'lex') {
       const ftsResults = store.searchFTS(q.query, 20, collection);
@@ -4894,6 +4925,11 @@ export async function hybridQuery(
       }
     }
   }
+  if (callId) logQueryEvent(callId, "debug", "hybridQuery.lex.end", {
+    stage: "expanded",
+    elapsedMs: Date.now() - lexStart,
+    queryCount: lexQueries.length,
+  });
 
   // 3b: Collect all texts that need vector search (original query + vec/hyde expansions)
   if (hasVectors) {
@@ -4904,6 +4940,14 @@ export async function hybridQuery(
       if (q.type === 'vec' || q.type === 'hyde') {
         vecQueries.push({ text: q.query, queryType: q.type });
       }
+    }
+
+    const vecCount = vecQueries.filter(q => q.queryType !== "hyde").length;
+    const hydeCount = vecQueries.filter(q => q.queryType === "hyde").length;
+    const vectorSearchStart = Date.now();
+    if (callId) {
+      logQueryEvent(callId, "debug", "hybridQuery.vec.start", { queryCount: vecCount });
+      logQueryEvent(callId, "debug", "hybridQuery.hyde.start", { queryCount: hydeCount });
     }
 
     // Batch embed all vector queries in a single call
@@ -4938,6 +4982,16 @@ export async function hybridQuery(
         });
       }
     }
+    if (callId) {
+      const elapsedMs = Date.now() - vectorSearchStart;
+      logQueryEvent(callId, "debug", "hybridQuery.vec.end", { elapsedMs, queryCount: vecCount });
+      logQueryEvent(callId, "debug", "hybridQuery.hyde.end", { elapsedMs, queryCount: hydeCount });
+    }
+  } else if (callId) {
+    logQueryEvent(callId, "debug", "hybridQuery.vec.start", { queryCount: 0, skipped: true });
+    logQueryEvent(callId, "debug", "hybridQuery.vec.end", { elapsedMs: 0, queryCount: 0, skipped: true });
+    logQueryEvent(callId, "debug", "hybridQuery.hyde.start", { queryCount: 0, skipped: true });
+    logQueryEvent(callId, "debug", "hybridQuery.hyde.end", { elapsedMs: 0, queryCount: 0, skipped: true });
   }
 
   // Step 4: RRF fusion — original-query FTS and vector lists get 2x weight;
@@ -4947,7 +5001,13 @@ export async function hybridQuery(
   const rrfTraceByFile = explain ? buildRrfTrace(rankedLists, weights, rankedListMeta) : null;
   const candidates = fused.slice(0, candidateLimit);
 
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) {
+    if (callId) {
+      logQueryEvent(callId, "debug", "hybridQuery.rerank.start", { candidateCount: 0, skipped: true });
+      logQueryEvent(callId, "debug", "hybridQuery.rerank.end", { elapsedMs: 0, candidateCount: 0, skipped: true });
+    }
+    return [];
+  }
 
   // Step 5: Chunk documents, pick best chunk per doc for reranking.
   // Reranking full bodies is O(tokens) — the critical perf lesson that motivated this refactor.
@@ -4977,6 +5037,10 @@ export async function hybridQuery(
   }
 
   if (skipRerank) {
+    if (callId) {
+      logQueryEvent(callId, "debug", "hybridQuery.rerank.start", { candidateCount: candidates.length, skipped: true });
+      logQueryEvent(callId, "debug", "hybridQuery.rerank.end", { elapsedMs: 0, candidateCount: candidates.length, skipped: true });
+    }
     // Skip LLM reranking — return candidates scored by RRF only
     const seenFiles = new Set<string>();
     return candidates
@@ -5037,8 +5101,18 @@ export async function hybridQuery(
 
   hooks?.onRerankStart?.(chunksToRerank.length);
   const rerankStart = Date.now();
-  const reranked = await store.rerank(query, chunksToRerank, undefined, intent);
-  hooks?.onRerankDone?.(Date.now() - rerankStart);
+  if (callId) logQueryEvent(callId, "debug", "hybridQuery.rerank.start", { candidateCount: chunksToRerank.length });
+  let reranked;
+  try {
+    reranked = await store.rerank(query, chunksToRerank, undefined, intent);
+  } finally {
+    const rerankElapsedMs = Date.now() - rerankStart;
+    if (callId) logQueryEvent(callId, "debug", "hybridQuery.rerank.end", {
+      elapsedMs: rerankElapsedMs,
+      candidateCount: chunksToRerank.length,
+    });
+    hooks?.onRerankDone?.(rerankElapsedMs);
+  }
 
   // Step 7: Blend RRF position score with reranker score
   // Position-aware weights: top retrieval results get more protection from reranker disagreement
