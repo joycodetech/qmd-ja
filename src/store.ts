@@ -5274,6 +5274,8 @@ export interface StructuredSearchOptions {
   skipRerank?: boolean;
   chunkStrategy?: ChunkStrategy;
   hooks?: SearchHooks;
+  /** Correlation ID for structured query logs */
+  callId?: string;
 }
 
 /**
@@ -5306,6 +5308,7 @@ export async function structuredSearch(
   const intent = options?.intent;
   const skipRerank = options?.skipRerank ?? false;
   const hooks = options?.hooks;
+  const callId = options?.callId;
 
   const collections = options?.collections;
 
@@ -5341,6 +5344,9 @@ export async function structuredSearch(
   const collectionList = collections ?? [undefined]; // undefined = all collections
 
   // Step 1: Run FTS for all lex searches (sync, instant)
+  const lexSearches = searches.filter(s => s.type === 'lex');
+  if (callId) logQueryEvent(callId, "debug", "structuredSearch.lex.start", { queryCount: lexSearches.length });
+  const lexStart = Date.now();
   for (const search of searches) {
     if (search.type === 'lex') {
       for (const coll of collectionList) {
@@ -5360,6 +5366,10 @@ export async function structuredSearch(
       }
     }
   }
+  if (callId) logQueryEvent(callId, "debug", "structuredSearch.lex.end", {
+    elapsedMs: Date.now() - lexStart,
+    queryCount: lexSearches.length,
+  });
 
   // Step 2: Batch embed and run vector searches for vec/hyde
   if (hasVectors) {
@@ -5368,6 +5378,8 @@ export async function structuredSearch(
         s.type === 'vec' || s.type === 'hyde'
     );
     if (vecSearches.length > 0) {
+      if (callId) logQueryEvent(callId, "debug", "structuredSearch.vec.start", { queryCount: vecSearches.length });
+      const vecStart = Date.now();
       const llm = getLlm(store);
       const embedModel = llm.embedModelName;
       const textsToEmbed = vecSearches.map(s => formatQueryForEmbedding(s.query, embedModel));
@@ -5400,6 +5412,10 @@ export async function structuredSearch(
           }
         }
       }
+      if (callId) logQueryEvent(callId, "debug", "structuredSearch.vec.end", {
+        elapsedMs: Date.now() - vecStart,
+        queryCount: vecSearches.length,
+      });
     }
   }
 
@@ -5506,8 +5522,18 @@ export async function structuredSearch(
 
   hooks?.onRerankStart?.(chunksToRerank.length);
   const rerankStart2 = Date.now();
-  const reranked = await store.rerank(primaryQuery, chunksToRerank, undefined, intent);
-  hooks?.onRerankDone?.(Date.now() - rerankStart2);
+  if (callId) logQueryEvent(callId, "debug", "structuredSearch.rerank.start", { candidateCount: chunksToRerank.length });
+  let reranked;
+  try {
+    reranked = await store.rerank(primaryQuery, chunksToRerank, undefined, intent);
+  } finally {
+    const rerankElapsedMs = Date.now() - rerankStart2;
+    if (callId) logQueryEvent(callId, "debug", "structuredSearch.rerank.end", {
+      elapsedMs: rerankElapsedMs,
+      candidateCount: chunksToRerank.length,
+    });
+    hooks?.onRerankDone?.(rerankElapsedMs);
+  }
 
   // Step 6: Blend RRF position score with reranker score
   const candidateMap = new Map(candidates.map(c => [c.file, {

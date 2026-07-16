@@ -415,6 +415,7 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
           candidateLimit: opts.candidateLimit,
           skipRerank,
           chunkStrategy: opts.chunkStrategy,
+          callId: opts.callId,
         });
       }
 

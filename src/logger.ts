@@ -7,7 +7,7 @@ import type { CollectionConfig } from "./collections.js";
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type ConfiguredLogLevel = LogLevel | "off";
 
-const DEFAULT_LOG_LEVEL: ConfiguredLogLevel = "info";
+const DEFAULT_LOG_LEVEL: ConfiguredLogLevel = "off";
 const LEVEL_PRIORITY: Record<ConfiguredLogLevel, number> = {
   off: 0,
   error: 1,

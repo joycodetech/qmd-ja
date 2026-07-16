@@ -86,6 +86,7 @@ import {
 } from "../store.js";
 import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive, isOnnxModelUri } from "../llm.js";
 import { getEmbeddingProvider, shouldUseLlamaCppTokenizerForEmbedding } from "../providers.js";
+import { newCallId, logQueryEvent, initLogger } from "../logger.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -134,9 +135,11 @@ function getStore(): ReturnType<typeof createStore> {
   if (!store) {
     store = createStore(storeDbPathOverride);
     // Sync YAML config into SQLite store_collections so store.ts reads from DB
+    let loadedConfig: CollectionConfig | undefined;
     try {
       const activeModels = ensureModelsConfiguredForCli();
       const config = loadConfig();
+      loadedConfig = config;
       syncConfigToDb(store.db, config);
       setDefaultLlamaCpp(new LlamaCpp({
         embedModel: activeModels.embed,
@@ -146,6 +149,9 @@ function getStore(): ReturnType<typeof createStore> {
     } catch {
       // Config may not exist yet — that's fine, DB works without it
     }
+    // Config may have failed to load above (no .qmd/index.yml yet) — still
+    // initialize the logger so QMD_LOG_LEVEL env var works without a config file.
+    initLogger(loadedConfig);
   }
   return store;
 }
@@ -2593,6 +2599,18 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
   // Intent can come from --intent flag or from intent: line in query document
   const intent = opts.intent || parsed?.intent;
 
+  const callId = newCallId();
+  const queryStart = Date.now();
+  logQueryEvent(callId, "info", "query.start", {
+    query,
+    structured: !!parsed,
+    limit: opts.all ? 500 : (opts.limit || 10),
+    minScore: opts.minScore || 0,
+    collection: singleCollection,
+    intent,
+  });
+
+  try {
   await withLLMSession(async () => {
     let results;
 
@@ -2622,6 +2640,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         explain: !!opts.explain,
         intent,
         chunkStrategy: opts.chunkStrategy,
+        callId,
         hooks: {
           onEmbedStart: (count) => {
             process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
@@ -2650,6 +2669,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         explain: !!opts.explain,
         intent,
         chunkStrategy: opts.chunkStrategy,
+        callId,
         hooks: {
           onStrongSignal: (score) => {
             process.stderr.write(`${c.dim}Strong BM25 signal (${score.toFixed(2)}) — skipping expansion${c.reset}\n`);
@@ -2691,6 +2711,10 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
     closeDb();
 
     if (results.length === 0) {
+      logQueryEvent(callId, "info", "query.end", {
+        elapsedMs: Date.now() - queryStart,
+        resultCount: 0,
+      });
       printEmptySearchResults(opts.format);
       return;
     }
@@ -2713,7 +2737,19 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       docid: r.docid,
       explain: r.explain,
     })), displayQuery, { ...opts, limit: results.length });
+
+    logQueryEvent(callId, "info", "query.end", {
+      elapsedMs: Date.now() - queryStart,
+      resultCount: results.length,
+    });
   }, { maxDuration: 10 * 60 * 1000, name: 'querySearch' });
+  } catch (error) {
+    logQueryEvent(callId, "error", "query.error", {
+      elapsedMs: Date.now() - queryStart,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 }
 
 // Parse CLI arguments using util.parseArgs
