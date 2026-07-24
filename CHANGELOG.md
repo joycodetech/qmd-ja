@@ -23,6 +23,25 @@
 - Test suite expanded: Vaporetto tokenization, CJK FTS, concurrent store
   initialization, ONNX provider routing, and bin wrapper behavior
 
+### Changed
+
+- `--full-path` no longer degrades silently when a result cannot be resolved on
+  disk (#785). A fallback there means the file moved or was deleted since the
+  last index, so `search`, `query`, `get` and `multi-get` now print a notice to
+  stderr naming how many results fell back and suggesting `qmd update`; stdout
+  stays machine-readable.
+- `search`/`query` now decide per result whether to show the docid under
+  `--full-path`, matching `multi-get` and `get`: a result that resolved shows
+  its on-disk path and no docid, one that did not keeps its `qmd://` URI *and*
+  its docid, so it is still addressable. Previously the docid was dropped for
+  every row whenever the flag was set, leaving unresolved rows with neither a
+  usable path nor an identifier.
+- `search --format csv` always emits the `docid` column, empty for rows that
+  resolved to an on-disk path. Under `--full-path` the header previously
+  dropped the column entirely — which also disagreed with the empty-result
+  header, always printed with `docid`. Column positions are now stable across
+  runs and formats.
+
 ## [2.6.3] - 2026-06-24
 
 ### Added
