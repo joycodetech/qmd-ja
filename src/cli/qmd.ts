@@ -982,6 +982,26 @@ function renderFullPath(absolutePath: string, cwd: string = process.cwd()): stri
   return real;
 }
 
+/**
+ * Report rows that `--full-path` could not turn into an on-disk path.
+ *
+ * The flag's whole job is producing openable paths, so falling back to a
+ * `qmd://` URI is worth saying out loud: it means the file moved or was
+ * deleted since the last index, not that the path was normalized away. The
+ * notice goes to stderr so stdout stays machine-readable.
+ */
+function warnUnresolvedFullPaths(unresolved: number, total: number): void {
+  if (unresolved <= 0) return;
+  const subject = total === 1
+    ? "the file"
+    : `${unresolved} of ${total} results`;
+  console.error(
+    `${c.yellow}warning:${c.reset} --full-path could not resolve ${subject} on disk ` +
+    `(moved or deleted since indexing); showing qmd:// + docid instead. ` +
+    `Run 'qmd update' to refresh the index.`
+  );
+}
+
 function getDocument(filename: string, fromLine?: number, maxLines?: number, lineNumbers?: boolean, fullPath: boolean = false): void {
   // Parse :line suffix from filename. Two forms:
   //   "file.md:100"     -> start at line 100
@@ -1040,7 +1060,8 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
   const canonicalPath = `qmd://${doc.displayPath}`;
 
   // --full-path: show the on-disk path instead of the qmd:// URL + docid, when
-  // the file actually exists. Fall back to the canonical header otherwise.
+  // the file actually exists. Fall back to the canonical header otherwise, and
+  // say so on stderr — a fallback here means the index is stale.
   let header: string;
   if (fullPath) {
     const fsPath = resolveVirtualPath(db, canonicalPath);
@@ -1048,6 +1069,7 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
       header = renderFullPath(fsPath);
     } else {
       header = docid ? `${canonicalPath}  #${docid}` : canonicalPath;
+      warnUnresolvedFullPaths(1, 1);
     }
   } else {
     header = docid ? `${canonicalPath}  #${docid}` : canonicalPath;
@@ -1276,6 +1298,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
   // resolved). Per result: pick the identifier and whether to show the docid.
   const identOf = (r: typeof results[number]): string => (fullPath && r.fsPath) ? r.fsPath : r.displayPath;
   const docidOf = (r: typeof results[number]): string | undefined => (fullPath && r.fsPath) ? undefined : r.docid;
+  const unresolvedCount = fullPath ? results.filter(r => !r.fsPath).length : 0;
 
   // Output based on format
   if (format === "json") {
@@ -1366,6 +1389,8 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
       console.log(r.body);
     }
   }
+
+  warnUnresolvedFullPaths(unresolvedCount, results.length);
 }
 
 // List files in virtual file tree
@@ -2181,20 +2206,37 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
     );
   };
 
-  // Helper to pick the visible path for a result. With --full-path we swap
+  // Resolve every row's visible identifier up front. With --full-path we swap
   // the qmd:// URI for the file's on-disk path via renderFullPath() (./-
-  // prefixed relative when under $PWD, absolute realpath otherwise). Falls
-  // back to qmd:// if the file is no longer resolvable on disk.
+  // prefixed relative when under $PWD, absolute realpath otherwise). A row
+  // whose file is gone from disk falls back to qmd:// and *keeps its docid*,
+  // so it stays addressable — the same per-row rule multiGet() uses. Resolving
+  // eagerly also means unresolved rows are counted before anything is printed.
   const linkDbForPaths = opts.fullPath ? getDb() : null;
-  const displayPathFor = (row: OutputRow): string => {
+  const resolutions = new Map<OutputRow, { ident: string; resolved: boolean }>();
+  for (const row of filtered) {
     // Always rebuild from displayPath so the active index name is included
     // as ?index=… for non-default indexes. row.file may not carry it.
     const qmdUri = toQmdPath(row.displayPath);
-    if (!opts.fullPath || !linkDbForPaths) return qmdUri;
-    const absolute = resolveVirtualPath(linkDbForPaths, qmdUri);
-    if (!absolute || !existsSync(absolute)) return qmdUri;
-    return renderFullPath(absolute);
-  };
+    let resolution = { ident: qmdUri, resolved: false };
+    if (opts.fullPath && linkDbForPaths) {
+      const absolute = resolveVirtualPath(linkDbForPaths, qmdUri);
+      if (absolute && existsSync(absolute)) {
+        resolution = { ident: renderFullPath(absolute), resolved: true };
+      }
+    }
+    resolutions.set(row, resolution);
+  }
+  const unresolvedCount = opts.fullPath
+    ? filtered.filter(row => !resolutions.get(row)?.resolved).length
+    : 0;
+
+  const displayPathFor = (row: OutputRow): string =>
+    resolutions.get(row)?.ident ?? toQmdPath(row.displayPath);
+  // Show the docid whenever it is still the row's identifier: always without
+  // --full-path, and with it only for rows that have no on-disk path to show.
+  const showDocid = (row: OutputRow): boolean =>
+    !opts.fullPath || !resolutions.get(row)?.resolved;
 
   if (opts.format === "json") {
     // JSON output for LLM consumption
@@ -2207,9 +2249,11 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         if (body) body = addLineNumbers(body);
         if (snippet) snippet = addLineNumbers(snippet);
       }
-      // With --full-path, omit docid (the on-disk path is the identifier).
+      // With --full-path, omit docid (the on-disk path is the identifier) —
+      // unless the path could not be resolved, in which case it is all the
+      // caller has.
       return {
-        ...(docid && !opts.fullPath && { docid: `#${docid}` }),
+        ...(docid && showDocid(row) && { docid: `#${docid}` }),
         score: Math.round(row.score * 100) / 100,
         file: displayPathFor(row),
         line: snippetInfo.line,
@@ -2261,7 +2305,7 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
       const snippetBody = snippet.split("\n").slice(1).join("\n").toLowerCase();
       const hasMatch = query.toLowerCase().split(/\s+/).some(t => t.length > 0 && snippetBody.includes(t));
       const lineInfo = hasMatch ? `:${line}` : "";
-      const docidStr = (docid && !opts.fullPath) ? ` ${c.dim}#${docid}${c.reset}` : "";
+      const docidStr = (docid && showDocid(row)) ? ` ${c.dim}#${docid}${c.reset}` : "";
 
       if (process.stdout.isTTY && absolutePath && parsed?.path) {
         const linkLine = hasMatch ? line : 1;
@@ -2330,8 +2374,9 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         content = addLineNumbers(content);
       }
       const fileLine = `**file:** \`${visiblePath}\`\n`;
-      // With --full-path the on-disk path is the identifier; drop the docid line.
-      const docidLine = (docid && !opts.fullPath) ? `**docid:** \`#${docid}\`\n` : "";
+      // With --full-path the on-disk path is the identifier; drop the docid
+      // line unless this row had no path to show.
+      const docidLine = (docid && showDocid(row)) ? `**docid:** \`#${docid}\`\n` : "";
       const contextLine = row.context ? `**context:** ${row.context}\n` : "";
       console.log(`---\n# ${heading}\n${fileLine}${docidLine}${contextLine}\n${content}\n`);
     }
@@ -2344,15 +2389,15 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
       if (opts.lineNumbers) {
         content = addLineNumbers(content);
       }
-      const docidAttr = opts.fullPath ? "" : ` docid="#${docid}"`;
+      const docidAttr = showDocid(row) ? ` docid="#${docid}"` : "";
       console.log(`<file${docidAttr} name="${displayPathFor(row)}"${titleAttr}${contextAttr}>\n${content}\n</file>\n`);
     }
   } else {
-    // CSV format
-    const csvHeader = opts.fullPath
-      ? "score,file,title,context,line,snippet"
-      : "docid,score,file,title,context,line,snippet";
-    console.log(csvHeader);
+    // CSV format. The docid column is always present — under --full-path it is
+    // empty for rows whose on-disk path was found and carries the docid for
+    // rows that fell back to a qmd:// URI, so the columns stay positional.
+    // (multi-get's CSV already emits the docid column unconditionally.)
+    console.log("docid,score,file,title,context,line,snippet");
     for (const row of filtered) {
       const { line, snippet } = extractSnippet(row.body, query, 500, row.chunkPos, row.chunkLen, opts.intent);
       let content = opts.full ? row.body : snippet;
@@ -2363,13 +2408,12 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
       const snippetText = content || "";
       const path = escapeCSV(displayPathFor(row));
       const tail = `${path},${escapeCSV(row.title || "")},${escapeCSV(row.context || "")},${line},${escapeCSV(snippetText)}`;
-      if (opts.fullPath) {
-        console.log(`${row.score.toFixed(4)},${tail}`);
-      } else {
-        console.log(`#${docid},${row.score.toFixed(4)},${tail}`);
-      }
+      const docidField = (docid && showDocid(row)) ? `#${docid}` : "";
+      console.log(`${docidField},${row.score.toFixed(4)},${tail}`);
     }
   }
+
+  warnUnresolvedFullPaths(unresolvedCount, filtered.length);
 }
 
 // Resolve -c collection filter: supports single string, array, or undefined.
@@ -3403,6 +3447,7 @@ function showHelp(): void {
   console.log("  --no-line-numbers          - Disable line numbers for get/multi-get");
   console.log("  --full-path                - Show on-disk paths instead of qmd:// + docid (get/multi-get/search/query)");
   console.log("                                Paths are ./-prefixed when under $PWD, absolute otherwise");
+  console.log("                                Results whose file is gone keep qmd:// + docid and warn on stderr");
   console.log("  --explain                  - Include retrieval score traces (query, CLI/--format json)");
   console.log("  --format <kind>            - Output format: cli (default) | json | csv | md | xml | files");
   console.log("  -c, --collection <name>    - Filter by one or more collections");

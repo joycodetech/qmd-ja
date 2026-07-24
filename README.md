@@ -892,6 +892,9 @@ and `deep-search` (→ `query`).
 --no-rerank        # Skip LLM reranking (RRF scores only; faster on CPU)
 -C, --candidate-limit <n>  # Max candidates to rerank (default: 40)
 --full-path        # Emit on-disk filesystem paths instead of qmd:// URIs
+                   # (a result whose file has moved or been deleted since
+                   #  indexing keeps its qmd:// URI + docid, and a notice is
+                   #  printed to stderr — run `qmd update` to refresh)
 
 # Output formats (for search and multi-get)
 --format <kind>    # cli (default) | json | csv | md | xml | files
