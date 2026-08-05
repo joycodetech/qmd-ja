@@ -1242,7 +1242,11 @@ export class LlamaCpp implements LLM {
                 ...(threads > 0 ? { threads } : {}),
               }));
             } catch {
-              throw new Error("Failed to create any rerank context");
+              console.warn(
+                "Reranker unavailable — skipping reranking. " +
+                "Use --no-rerank to silence this warning.",
+              );
+              return [];
             }
           }
           break;
@@ -1619,6 +1623,12 @@ export class LlamaCpp implements LLM {
     this.touchActivity();
 
     const contexts = await this.ensureRerankContexts();
+    if (contexts.length === 0) {
+      return {
+        results: documents.map((d) => ({ ...d, score: 0.5, index: 0 })),
+        model: "fallback",
+      };
+    }
     const model = await this.ensureRerankModel();
 
     // Truncate documents that would exceed the rerank context size.
