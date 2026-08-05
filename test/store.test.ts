@@ -330,6 +330,15 @@ describe("Store Creation", () => {
     expect(tableNames).toContain("llm_cache");
     // Note: path_contexts table removed in favor of YAML-based context storage
 
+    // The status-scan covering index ships with the schema — without it every
+    // getHashesNeedingEmbedding() pays a full content_vectors scan through a
+    // transient automatic index.
+    const indexes = store.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type='index' AND tbl_name='content_vectors'
+    `).all() as { name: string }[];
+    expect(indexes.map(i => i.name)).toContain("idx_content_vectors_model_fingerprint");
+
     await cleanupTestDb(store);
   });
 
@@ -372,8 +381,15 @@ describe("Store Creation", () => {
     legacyDb.close();
 
     const store = createStore(dbPath);
+    const indexNames = () => (store.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type='index' AND tbl_name='content_vectors'
+    `).all() as { name: string }[]).map(i => i.name);
     let columns = store.db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
     expect(columns.map(col => col.name)).not.toContain("embed_fingerprint");
+    // The status-scan index needs the modern columns, so it must stay deferred
+    // alongside the column migration itself.
+    expect(indexNames()).not.toContain("idx_content_vectors_model_fingerprint");
 
     expect(store.getHashesNeedingEmbedding(model)).toBe(1);
 
@@ -381,6 +397,8 @@ describe("Store Creation", () => {
     const migratedRow = store.db.prepare(`SELECT embed_fingerprint FROM content_vectors WHERE hash = ?`).get("hash1") as { embed_fingerprint: string };
     expect(columns.map(col => col.name)).toContain("embed_fingerprint");
     expect(migratedRow.embed_fingerprint).toBe("");
+    // The lazy column repair recreates the deferred status-scan index.
+    expect(indexNames()).toContain("idx_content_vectors_model_fingerprint");
 
     await cleanupTestDb(store);
   });

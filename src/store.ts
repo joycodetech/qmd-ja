@@ -1093,6 +1093,8 @@ function initializeDatabase(db: Database): void {
     )
   `);
 
+  ensureContentVectorsStatusIndex(db);
+
   // Store collections — makes the DB self-contained (no external config needed)
   db.exec(`
     CREATE TABLE IF NOT EXISTS store_collections (
@@ -1637,6 +1639,30 @@ function isContentVectorColumnError(error: unknown): boolean {
   return CONTENT_VECTOR_DESIRED_COLUMNS.some(col => message.includes(col.name));
 }
 
+/**
+ * Covering index for the embedding-status aggregations over content_vectors
+ * (getHashesNeedingEmbedding and the legacy-fingerprint scans). Without it,
+ * SQLite materializes a transient "automatic covering index" over the whole
+ * table on every execution — measured at ~3.3s per call on an 81k-row index,
+ * and the MCP server runs that query synchronously inside every `initialize`.
+ * Legacy databases can predate the (model, embed_fingerprint, total_chunks)
+ * columns: skip creation there so startup stays probe-free, and let
+ * runContentVectorColumnRepairs() add the index right after it adds the
+ * missing columns.
+ */
+function ensureContentVectorsStatusIndex(db: Database): void {
+  try {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_content_vectors_model_fingerprint
+      ON content_vectors(model, embed_fingerprint, hash, total_chunks)
+    `);
+  } catch (error) {
+    if (!isContentVectorColumnError(error)) {
+      throw error;
+    }
+  }
+}
+
 function runContentVectorColumnRepairs(db: Database): void {
   for (const column of CONTENT_VECTOR_DESIRED_COLUMNS) {
     try {
@@ -1651,6 +1677,7 @@ function runContentVectorColumnRepairs(db: Database): void {
       }
     }
   }
+  ensureContentVectorsStatusIndex(db);
 }
 
 function withLazyContentVectorMigration<T>(db: Database, operation: () => T): T {
