@@ -474,6 +474,79 @@ describe("CLI Add Command", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Collection:");
     expect(stdout).toContain("Indexed:");
+    expect(stdout).toContain("Collection 'fixtures' created successfully");
+  });
+
+  test("rejects a nonexistent collection path without persisting it", async () => {
+    const env = await createIsolatedTestEnv("missing-collection-path");
+    const missingPath = join(fixturesDir, "does-not-exist");
+
+    const { stdout, stderr, exitCode } = await runQmd(["collection", "add", missingPath], {
+      dbPath: env.dbPath,
+      configDir: env.configDir,
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Collection path does not exist");
+    expect(stderr).toContain(`Received: ${missingPath}`);
+    expect(stderr).toContain("Resolved:");
+    expect(stderr).toContain("Provide an existing directory");
+    expect(stdout).not.toContain("created successfully");
+    expect(readFileSync(join(env.configDir, "index.yml"), "utf8")).toBe("collections: {}\n");
+
+    const listResult = await runQmd(["collection", "list"], {
+      dbPath: env.dbPath,
+      configDir: env.configDir,
+    });
+    expect(listResult.stdout).not.toContain("does-not-exist");
+  });
+
+  test("rejects a path containing swallowed collection flags without persisting it", async () => {
+    const env = await createIsolatedTestEnv("swallowed-collection-flags");
+    const malformedPath = `${join(fixturesDir, "missing")} --name swallowed --mask *.md`;
+    const derivedName = "missing --name swallowed --mask *.md";
+
+    const { stdout, stderr, exitCode } = await runQmd(["collection", "add", malformedPath], {
+      dbPath: env.dbPath,
+      configDir: env.configDir,
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Collection path does not exist");
+    expect(stderr).toContain(`Received: ${malformedPath}`);
+    expect(stderr).toContain("Resolved:");
+    expect(stdout).not.toContain("created successfully");
+    expect(readFileSync(join(env.configDir, "index.yml"), "utf8")).toBe("collections: {}\n");
+
+    const listResult = await runQmd(["collection", "list"], {
+      dbPath: env.dbPath,
+      configDir: env.configDir,
+    });
+    expect(listResult.stdout).not.toContain(derivedName);
+  });
+
+  test("rejects a regular file as a collection path without persisting it", async () => {
+    const env = await createIsolatedTestEnv("file-collection-path");
+    const filePath = join(fixturesDir, "README.md");
+
+    const { stdout, stderr, exitCode } = await runQmd(["collection", "add", filePath], {
+      dbPath: env.dbPath,
+      configDir: env.configDir,
+    });
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Collection path is not a directory");
+    expect(stderr).toContain(`Received: ${filePath}`);
+    expect(stderr).toContain("Resolved:");
+    expect(stderr).toContain("Choose a directory");
+    expect(stdout).not.toContain("created successfully");
+    expect(readFileSync(join(env.configDir, "index.yml"), "utf8")).toBe("collections: {}\n");
+
+    const listResult = await runQmd(["collection", "list"], {
+      dbPath: env.dbPath,
+      configDir: env.configDir,
+    });
+    expect(listResult.stdout).not.toContain("README.md");
   });
 
   test("adds files with custom glob pattern", async () => {

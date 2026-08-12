@@ -4225,6 +4225,22 @@ if (isMain) {
           const globPattern = cli.values.mask as string || DEFAULT_GLOB;
           const name = cli.values.name as string | undefined;
 
+          if (!existsSync(resolvedPwd)) {
+            console.error(`${c.yellow}Collection path does not exist.${c.reset}`);
+            console.error(`  Received: ${pwd}`);
+            console.error(`  Resolved: ${resolvedPwd}`);
+            console.error("Provide an existing directory and run 'qmd collection add <path>' again.");
+            process.exit(1);
+          }
+
+          if (!statSync(resolvedPwd).isDirectory()) {
+            console.error(`${c.yellow}Collection path is not a directory.${c.reset}`);
+            console.error(`  Received: ${pwd}`);
+            console.error(`  Resolved: ${resolvedPwd}`);
+            console.error("Choose a directory and run 'qmd collection add <path>' again.");
+            process.exit(1);
+          }
+
           await collectionAdd(resolvedPwd, globPattern, name);
           break;
         }
