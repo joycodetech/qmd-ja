@@ -669,19 +669,22 @@ describe("CLI Status Command", () => {
     // blob. That sidecar matches the model-cache lookup's `includes(filename)`
     // test, so a naive scan inspects it as a GGUF and reports the model
     // "invalid" — order-dependently, whenever readdir yields the sidecar
-    // before the blob. The sidecar must be skipped.
+    // before the blob (#812). Only real `.gguf` files must be considered.
     const env = await createIsolatedTestEnv("doctor-etag-sidecar");
-    const model = "hf:example/custom-model/custom.gguf";
+    // Mirror the embeddinggemma layout from #812: bare `<name>.gguf.etag`
+    // sorts before the node-llama-cpp `hf_<org>_<name>.gguf` blob.
+    const model = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
     await writeFile(join(env.configDir, "index.yml"), `collections: {}\nmodels:\n  embed: ${model}\n  generate: ${model}\n  rerank: ${model}\n`);
     const cacheRoot = join(env.configDir, "cache");
     const modelCacheDir = join(cacheRoot, "qmd", "models");
     await mkdir(modelCacheDir, { recursive: true });
     // Create the sidecar first so readdir is more likely to surface it before
     // the blob on order-preserving filesystems (the bug's trigger condition).
-    await writeFile(join(modelCacheDir, "custom.gguf.etag"), '"a1b2c3d4e5"\n');
-    // A real blob: node-llama-cpp stores it `hf_<org>_<filename>`. Any name
-    // containing the filename works; it just needs the GGUF magic to be valid.
-    await writeFile(join(modelCacheDir, "hf_example_custom.gguf"), Buffer.concat([Buffer.from("GGUF"), Buffer.alloc(60)]));
+    await writeFile(join(modelCacheDir, "embeddinggemma-300M-Q8_0.gguf.etag"), '"9d3a1b2c3d4e5"\n');
+    await writeFile(
+      join(modelCacheDir, "hf_ggml-org_embeddinggemma-300M-Q8_0.gguf"),
+      Buffer.concat([Buffer.from("GGUF"), Buffer.alloc(60)]),
+    );
 
     const { stdout, exitCode } = await runQmd(["doctor"], {
       dbPath: env.dbPath,

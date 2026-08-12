@@ -3492,11 +3492,12 @@ function findCachedModelInspection(model: string): CachedModelInspection {
     if (!filename || !existsSync(DEFAULT_MODEL_CACHE_DIR)) return { path: null, invalid };
     const entries = readdirSync(DEFAULT_MODEL_CACHE_DIR, { withFileTypes: true });
     for (const entry of entries) {
-      // Skip the `<filename>.etag` HTTP sidecar that `qmd pull` writes next to
-      // each blob. It satisfies `includes(filename)` but is not a GGUF, so
-      // inspecting it as one surfaces a spurious "invalid" model in `qmd
-      // doctor` whenever readdir happens to yield the sidecar before the blob.
-      if (!entry.isFile() || entry.name.endsWith(".etag") || !entry.name.includes(filename)) continue;
+      // Only consider real `.gguf` blobs. `qmd pull` writes a `<filename>.etag`
+      // HTTP sidecar next to each download; that name also satisfies
+      // `includes(filename)`, so inspecting it as GGUF false-positives
+      // "invalid model" in `qmd doctor` whenever readdir yields the sidecar
+      // before the blob (#812).
+      if (!entry.isFile() || !entry.name.endsWith(".gguf") || !entry.name.includes(filename)) continue;
       const candidate = pathJoin(DEFAULT_MODEL_CACHE_DIR, entry.name);
       const inspection = inspectGgufFile(candidate);
       if (inspection.valid) return { path: candidate, invalid };
