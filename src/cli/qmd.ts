@@ -2,6 +2,7 @@ import { isBun, openDatabase } from "../db.js";
 import type { Database, SQLiteValue } from "../db.js";
 import fastGlob from "fast-glob";
 import { execSync, spawn as nodeSpawn } from "child_process";
+import { isQmdMcpPid } from "./mcp-pid.js";
 import { fileURLToPath } from "url";
 import { basename, dirname, join as pathJoin, relative as relativePath, resolve as pathResolve } from "path";
 import { parseArgs } from "util";
@@ -513,12 +514,11 @@ async function showStatus(): Promise<void> {
   const mcpPidPath = resolve(mcpCacheDir, "mcp.pid");
   if (existsSync(mcpPidPath)) {
     const mcpPid = parseInt(readFileSync(mcpPidPath, "utf-8").trim());
-    try {
-      process.kill(mcpPid, 0);
+    if (isQmdMcpPid(mcpPid)) {
       console.log(`MCP:   ${c.green}running${c.reset} (PID ${mcpPid})`);
-    } catch {
-      unlinkSync(mcpPidPath);
-      // Stale PID file cleaned up silently
+    } else {
+      try { unlinkSync(mcpPidPath); } catch { /* ignore */ }
+      // Stale / recycled PID file cleaned up silently
     }
   }
   console.log("");
@@ -4503,13 +4503,17 @@ if (isMain) {
           process.exit(0);
         }
         const pid = parseInt(readFileSync(pidPath, "utf-8").trim());
+        if (!isQmdMcpPid(pid)) {
+          try { unlinkSync(pidPath); } catch { /* ignore */ }
+          console.log("Cleaned up stale PID file (server was not running).");
+          process.exit(0);
+        }
         try {
-          process.kill(pid, 0); // alive?
           process.kill(pid, "SIGTERM");
           unlinkSync(pidPath);
           console.log(`Stopped QMD MCP server (PID ${pid}).`);
         } catch {
-          unlinkSync(pidPath);
+          try { unlinkSync(pidPath); } catch { /* ignore */ }
           console.log("Cleaned up stale PID file (server was not running).");
         }
         process.exit(0);
@@ -4523,16 +4527,15 @@ if (isMain) {
         const host = cli.values.host ? String(cli.values.host) : undefined;
 
         if (cli.values.daemon) {
-          // Guard: check if already running
+          // Guard: check if already running (identity-checked — recycled PIDs are stale)
           if (existsSync(pidPath)) {
             const existingPid = parseInt(readFileSync(pidPath, "utf-8").trim());
-            try {
-              process.kill(existingPid, 0); // alive?
+            if (isQmdMcpPid(existingPid)) {
               console.error(`Already running (PID ${existingPid}). Run 'qmd mcp stop' first.`);
               process.exit(1);
-            } catch {
-              // Stale PID file — continue
             }
+            // Stale or recycled PID file — remove and continue
+            try { unlinkSync(pidPath); } catch { /* ignore */ }
           }
 
           mkdirSync(cacheDir, { recursive: true });
@@ -4561,6 +4564,16 @@ if (isMain) {
         // async cleanup handlers in startMcpHttpServer actually run.
         process.removeAllListeners("SIGTERM");
         process.removeAllListeners("SIGINT");
+        // Best-effort: if this process owns the daemon pidfile, unlink on exit
+        // (covers SIGTERM/SIGINT via startMcpHttpServer's process.exit).
+        const unlinkOwnPidfile = () => {
+          try {
+            if (!existsSync(pidPath)) return;
+            const written = parseInt(readFileSync(pidPath, "utf-8").trim());
+            if (written === process.pid) unlinkSync(pidPath);
+          } catch { /* ignore */ }
+        };
+        process.on("exit", unlinkOwnPidfile);
         const { startMcpHttpServer } = await import("../mcp/server.js");
         try {
           await startMcpHttpServer(port, { dbPath: getDbPath(), host });

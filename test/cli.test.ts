@@ -2552,6 +2552,60 @@ describe("mcp http daemon", () => {
     await sleep(500);
     try { unlinkSync(pidPath()); } catch {}
   });
+
+  test("stop does not SIGTERM a live non-qmd PID from a recycled pidfile (#806)", async () => {
+    // Stand-in for a recycled PID owner (must not be killed)
+    const decoy = spawn("sleep", ["1000000"], { stdio: "ignore" });
+    expect(decoy.pid).toBeTruthy();
+    spawnedPids.push(decoy.pid!);
+    writeFileSync(pidPath(), String(decoy.pid));
+
+    try {
+      const { stdout, exitCode } = await runDaemonQmd(["mcp", "stop"]);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("stale");
+      expect(existsSync(pidPath())).toBe(false);
+
+      // Decoy must still be alive
+      expect(() => process.kill(decoy.pid!, 0)).not.toThrow();
+    } finally {
+      decoy.kill("SIGTERM");
+      await new Promise<void>((resolve) => decoy.once("close", () => resolve()));
+    }
+  });
+
+  test("--daemon treats live non-qmd pidfile PID as stale and starts (#806)", async () => {
+    const decoy = spawn("sleep", ["1000000"], { stdio: "ignore" });
+    expect(decoy.pid).toBeTruthy();
+    spawnedPids.push(decoy.pid!);
+    writeFileSync(pidPath(), String(decoy.pid));
+
+    const port = randomPort();
+    try {
+      const { stdout, stderr, exitCode } = await runDaemonQmd([
+        "mcp", "--http", "--daemon", "--port", String(port),
+      ]);
+      expect(exitCode).toBe(0);
+      expect(stderr).not.toContain("Already running");
+      expect(stdout).toContain(`http://localhost:${port}/mcp`);
+
+      const pid = parseInt(readFileSync(pidPath(), "utf-8").trim());
+      spawnedPids.push(pid);
+      expect(pid).not.toBe(decoy.pid);
+
+      // Decoy must still be alive
+      expect(() => process.kill(decoy.pid!, 0)).not.toThrow();
+
+      const ready = await waitForServer(port);
+      expect(ready).toBe(true);
+      process.kill(pid, "SIGTERM");
+      await sleep(500);
+      try { unlinkSync(pidPath()); } catch {}
+    } finally {
+      decoy.kill("SIGTERM");
+      await new Promise<void>((resolve) => decoy.once("close", () => resolve()));
+    }
+  });
 });
 
 // =============================================================================
