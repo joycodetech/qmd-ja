@@ -28,6 +28,75 @@ import {
   type RerankDocument,
   type ILLMSession,
 } from "../src/llm.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+describe("model download progress (#776)", () => {
+  test("pullModels hides node-llama-cpp CLI progress by default", async () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "qmd-pull-quiet-"));
+    const resolveModelFile = vi.fn(async () => join(cacheDir, "missing.gguf"));
+    setNodeLlamaCppModuleForTest({
+      LlamaLogLevel: { error: "error" },
+      resolveModelFile,
+      LlamaChatSession: vi.fn() as any,
+      getLlama: vi.fn(),
+    });
+    try {
+      await pullModels(["local-model.gguf"], { cacheDir });
+      expect(resolveModelFile).toHaveBeenCalledWith(
+        "local-model.gguf",
+        { directory: cacheDir, cli: false },
+      );
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  test("pullModels shows CLI progress only when cli: true", async () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "qmd-pull-progress-"));
+    const resolveModelFile = vi.fn(async () => join(cacheDir, "missing.gguf"));
+    setNodeLlamaCppModuleForTest({
+      LlamaLogLevel: { error: "error" },
+      resolveModelFile,
+      LlamaChatSession: vi.fn() as any,
+      getLlama: vi.fn(),
+    });
+    try {
+      await pullModels(["local-model.gguf"], { cacheDir, cli: true });
+      expect(resolveModelFile).toHaveBeenCalledWith(
+        "local-model.gguf",
+        { directory: cacheDir, cli: true },
+      );
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  test("LlamaCpp.resolveModel also hides download progress", async () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "qmd-resolve-quiet-"));
+    const resolveModelFile = vi.fn(async () => join(cacheDir, "missing.gguf"));
+    setNodeLlamaCppModuleForTest({
+      LlamaLogLevel: { error: "error" },
+      resolveModelFile,
+      LlamaChatSession: vi.fn() as any,
+      getLlama: vi.fn(),
+    });
+    try {
+      const llm = new LlamaCpp({ modelCacheDir: cacheDir });
+      await (llm as any).resolveModel("local-model.gguf");
+      expect(resolveModelFile).toHaveBeenCalledWith(
+        "local-model.gguf",
+        { directory: cacheDir, cli: false },
+      );
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+      rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("model name resolution", () => {
   function withModelEnv(env: Record<string, string | undefined>, fn: () => void): void {

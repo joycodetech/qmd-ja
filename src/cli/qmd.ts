@@ -3099,6 +3099,7 @@ function parseCLI() {
       // Update options
       pull: { type: "boolean" },  // git pull before update
       refresh: { type: "boolean" },
+      progress: { type: "boolean" },  // qmd pull: show node-llama-cpp download progress bar
       "dry-run": { type: "boolean" },  // cleanup: report what would be removed
       // Get options
       l: { type: "string" },  // max lines
@@ -4736,6 +4737,7 @@ if (isMain) {
       const results = await pullModels(models, {
         refresh,
         cacheDir: DEFAULT_MODEL_CACHE_DIR,
+        cli: Boolean(cli.values.progress),
       });
       for (const result of results) {
         const size = formatBytes(result.sizeBytes);
