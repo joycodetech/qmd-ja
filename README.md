@@ -677,6 +677,9 @@ qmd-ja collection add ~/Documents/notes --name notes --mask "**/*.md"
 # Comma-separated masks are a union (brace form `{a,b}` also works)
 qmd collection add ~/notes --name notes --mask "sources/**/*.md,CO - *.md"
 
+# Comma-separated masks are a union (brace form `{a,b}` also works)
+qmd collection add ~/notes --name notes --mask "sources/**/*.md,CO - *.md"
+
 # List all collections
 qmd-ja collection list
 
