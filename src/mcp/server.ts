@@ -865,14 +865,47 @@ export type HttpServerHandle = {
 };
 
 /**
+ * Default idle TTL for HTTP MCP sessions, in seconds. Overridable per call
+ * via `options.sessionTtlSeconds` or globally via the QMD_MCP_SESSION_TTL env
+ * var; 0 disables expiry entirely.
+ */
+const DEFAULT_SESSION_TTL_SECONDS = 3600;
+
+function resolveSessionTtlMs(sessionTtlSeconds?: number): number {
+  let seconds = sessionTtlSeconds;
+  if (seconds === undefined) {
+    const envValue = process.env.QMD_MCP_SESSION_TTL?.trim();
+    if (envValue) {
+      seconds = Number(envValue);
+      if (!Number.isFinite(seconds) || seconds < 0) {
+        throw new Error(`Invalid QMD_MCP_SESSION_TTL: ${envValue}. Must be a non-negative number of seconds (0 disables session expiry).`);
+      }
+    }
+  }
+  seconds ??= DEFAULT_SESSION_TTL_SECONDS;
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    throw new Error(`Invalid session TTL: ${seconds}. Must be a non-negative number of seconds (0 disables session expiry).`);
+  }
+  return Math.floor(seconds * 1000);
+}
+
+/**
  * Start MCP server over Streamable HTTP (JSON responses, no SSE).
  * Binds to `options.host` (default "localhost", overridable via the QMD_HOST
  * env var) — set "0.0.0.0" to accept connections from other hosts, e.g. a
  * container liveness probe. Returns a handle for shutdown and port discovery.
+ *
+ * Sessions idle for longer than the TTL (default 1 hour; see
+ * `resolveSessionTtlMs`) are closed by a background reaper. Ephemeral clients
+ * that connect once and never come back — agents, cron jobs, health probes —
+ * otherwise accumulate a server + transport pair each, forever. Expiry is
+ * spec-sanctioned: Streamable HTTP servers may terminate sessions at any
+ * time, and a client that gets 404 for its session ID MUST start a new one
+ * by re-initializing.
  */
 export async function startMcpHttpServer(
   port: number,
-  options: ({ quiet?: boolean; host?: string } & McpStartupOptions) = {},
+  options: ({ quiet?: boolean; host?: string; sessionTtlSeconds?: number } & McpStartupOptions) = {},
 ): Promise<HttpServerHandle> {
   // See startMcpServer() for the rationale — flip production mode here so the
   // HTTP transport resolves the real database path, without leaking state into
@@ -889,14 +922,18 @@ export async function startMcpHttpServer(
 
   // Session map: each client gets its own McpServer + Transport pair (MCP spec requirement).
   // The store is shared — it's stateless SQLite, safe for concurrent access.
-  const sessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
+  type SessionEntry = {
+    transport: WebStandardStreamableHTTPServerTransport;
+    lastActivityAt: number;
+  };
+  const sessions = new Map<string, SessionEntry>();
 
   async function createSession(): Promise<WebStandardStreamableHTTPServerTransport> {
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       enableJsonResponse: true,
       onsessioninitialized: (sessionId: string) => {
-        sessions.set(sessionId, transport);
+        sessions.set(sessionId, { transport, lastActivityAt: Date.now() });
         log(`${ts()} New session ${sessionId} (${sessions.size} active)`);
       },
     });
@@ -910,6 +947,30 @@ export async function startMcpHttpServer(
     };
 
     return transport;
+  }
+
+  // Reap idle sessions so ephemeral clients can't grow the session table
+  // without bound. Any request routed to a session refreshes its activity
+  // timestamp, so long-lived clients that keep talking are never expired;
+  // clients whose session was reaped get 404 and re-initialize per spec.
+  const sessionTtlMs = resolveSessionTtlMs(options.sessionTtlSeconds);
+  let sessionReaper: ReturnType<typeof setInterval> | null = null;
+  if (sessionTtlMs > 0) {
+    sessionReaper = setInterval(() => {
+      const now = Date.now();
+      for (const [sessionId, entry] of sessions) {
+        if (now - entry.lastActivityAt < sessionTtlMs) continue;
+        const idleSeconds = Math.round((now - entry.lastActivityAt) / 1000);
+        log(`${ts()} Session ${sessionId} idle ${idleSeconds}s — expiring (${sessions.size - 1} active)`);
+        entry.transport.close().catch((err: unknown) => {
+          // transport.onclose normally removes the entry; make sure a close
+          // failure can't keep the session pinned in the map forever.
+          sessions.delete(sessionId);
+          log(`${ts()} Error closing idle session ${sessionId}: ${err}`);
+        });
+      }
+    }, Math.min(sessionTtlMs, 60_000));
+    sessionReaper.unref();
   }
 
   const startTime = Date.now();
@@ -1056,7 +1117,8 @@ export async function startMcpHttpServer(
             }));
             return;
           }
-          transport = existing;
+          existing.lastActivityAt = Date.now();
+          transport = existing.transport;
         } else if (isInitializeRequest(body)) {
           transport = await createSession();
         } else {
@@ -1095,8 +1157,8 @@ export async function startMcpHttpServer(
           }));
           return;
         }
-        const transport = sessions.get(sessionId);
-        if (!transport) {
+        const entry = sessions.get(sessionId);
+        if (!entry) {
           nodeRes.writeHead(404, { "Content-Type": "application/json" });
           nodeRes.end(JSON.stringify({
             jsonrpc: "2.0",
@@ -1105,6 +1167,8 @@ export async function startMcpHttpServer(
           }));
           return;
         }
+        entry.lastActivityAt = Date.now();
+        const transport = entry.transport;
 
         const url = `http://localhost:${port}${pathname}`;
         const rawBody = nodeReq.method !== "GET" && nodeReq.method !== "HEAD" ? await collectBody(nodeReq) : undefined;
@@ -1136,8 +1200,11 @@ export async function startMcpHttpServer(
   const stop = async () => {
     if (stopping) return;
     stopping = true;
-    for (const transport of sessions.values()) {
-      await transport.close();
+    if (sessionReaper) {
+      clearInterval(sessionReaper);
+    }
+    for (const entry of sessions.values()) {
+      await entry.transport.close();
     }
     sessions.clear();
     httpServer.close();

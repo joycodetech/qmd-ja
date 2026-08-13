@@ -1154,4 +1154,52 @@ describe.skipIf(!!process.env.CI)("MCP HTTP Transport", () => {
     expect(hit.line).toBe(301);
     expect(hit.snippet).toMatch(/^\d+: @@ -3\d\d,/);
   });
+
+  test("idle sessions expire after the TTL and clients can re-initialize", async () => {
+    // Separate server so the aggressive TTL can't interfere with the shared
+    // handle used by the other tests.
+    const ttlHandle = await startMcpHttpServer(0, { quiet: true, sessionTtlSeconds: 1 });
+    const url = `http://localhost:${ttlHandle.port}/mcp`;
+    const headers = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+    const initBody = (id: number) => JSON.stringify({
+      jsonrpc: "2.0", id, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+    });
+    try {
+      const init = await fetch(url, { method: "POST", headers, body: initBody(1) });
+      expect(init.status).toBe(200);
+      const sid = init.headers.get("mcp-session-id");
+      expect(sid).toBeTruthy();
+
+      // Requests inside the TTL keep the session alive.
+      const early = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, "mcp-session-id": sid! },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+      });
+      expect(early.status).toBe(200);
+
+      // Idle past the TTL: the reaper closes the session and the server
+      // answers 404, which per the Streamable HTTP spec tells the client to
+      // start a new session.
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      const stale = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, "mcp-session-id": sid! },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }),
+      });
+      expect(stale.status).toBe(404);
+
+      const reinit = await fetch(url, { method: "POST", headers, body: initBody(4) });
+      expect(reinit.status).toBe(200);
+      const newSid = reinit.headers.get("mcp-session-id");
+      expect(newSid).toBeTruthy();
+      expect(newSid).not.toBe(sid);
+    } finally {
+      await ttlHandle.stop();
+    }
+  });
 });
