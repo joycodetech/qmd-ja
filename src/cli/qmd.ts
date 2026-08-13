@@ -4505,12 +4505,16 @@ if (isMain) {
       }
       const { runBenchmark } = await import("../bench/bench.js");
       const benchCollection = cli.opts.collection;
-      await runBenchmark(fixturePath, {
-        json: !!cli.values.json,
-        collection: Array.isArray(benchCollection) ? benchCollection[0] : benchCollection,
-        dbPath: getDbPath(),
-        configPath: configExists() ? getConfigPath() : undefined,
-      });
+      try {
+        await runBenchmark(fixturePath, {
+          json: !!cli.values.json,
+          collection: Array.isArray(benchCollection) ? benchCollection[0] : benchCollection,
+          dbPath: getDbPath(),
+          configPath: configExists() ? getConfigPath() : undefined,
+        });
+      } catch (error) {
+        exitWithError(error);
+      }
       break;
     }
 
