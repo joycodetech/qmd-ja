@@ -1427,6 +1427,8 @@ export type Store = {
 
   // Query expansion & reranking
   expandQuery: (query: string, model?: string, intent?: string, callId?: string) => Promise<ExpandedQuery[]>;
+  /** Drop the cached expansion for a query so the next call regenerates. */
+  invalidateExpansionCache: (query: string) => void;
   rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => Promise<{ file: string; score: number }[]>;
 
   // Document retrieval
@@ -2140,7 +2142,14 @@ export function createStore(dbPath?: string): Store {
 
     // Query expansion & reranking
     expandQuery: (query: string, model?: string, intent?: string, callId?: string) => expandQuery(query, model ?? store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL, db, intent, store.llm, callId),
-    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => rerank(query, documents, model ?? store.llm?.rerankModelName, db, intent, store.llm),
+    invalidateExpansionCache: (query: string) => deleteExpansionCacheEntry(db, query, store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL),
+    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => {
+      // Cache keys must use the resolved rerank model (store.llm or the global
+      // singleton from models.rerank). Falling back to DEFAULT_RERANK_MODEL when
+      // store.llm is unset made keys stable across config swaps (#764).
+      const llm = getLlm(store);
+      return rerank(query, documents, model ?? llm.rerankModelName ?? DEFAULT_RERANK_MODEL, db, intent, llm);
+    },
 
     // Document retrieval
     findDocument: (filename: string, options?: { includeBody?: boolean }) => findDocument(db, filename, options),
@@ -4189,8 +4198,13 @@ function removeIncompleteEmbeddings(db: Database, expectedChunksByHash: Map<stri
 // =============================================================================
 
 export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp, callId?: string): Promise<ExpandedQuery[]> {
-  // Check cache first — stored as JSON preserving types
-  const cacheKey = getCacheKey("expandQuery", { query, model, ...(intent && { intent }) });
+  // Check cache first — stored as JSON preserving types. Intent is
+  // deliberately absent from both the cache key and the generation call:
+  // feeding caller intent to the expansion model contaminates sub-queries
+  // with intent meta-language (see LlamaCpp.expandQuery), and keying the
+  // cache by intent multiplied the poisoned entries per (query, intent) pair.
+  // intent/callId are still threaded through for structured query logging.
+  const cacheKey = getCacheKey("expandQuery", { query, model });
   const cached = getCachedResult(db, cacheKey);
   if (cached) {
     try {
@@ -4234,6 +4248,16 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
   }
 
   return expanded;
+}
+
+/**
+ * Delete the cached expansion for a query. hybridQuery() calls this when an
+ * expansion's sub-queries all came back empty — left in place, the dud entry
+ * would replay the same misses on every warm repeat of the query.
+ */
+export function deleteExpansionCacheEntry(db: Database, query: string, model: string = DEFAULT_QUERY_MODEL): void {
+  const cacheKey = getCacheKey("expandQuery", { query, model });
+  db.prepare(`DELETE FROM llm_cache WHERE hash = ?`).run(cacheKey);
 }
 
 // =============================================================================
@@ -5318,6 +5342,19 @@ export async function hybridQuery(
     logQueryEvent(callId, "debug", "hybridQuery.hyde.end", { elapsedMs: 0, queryCount: 0, skipped: true });
   }
 
+  // Step 3c: drop a cached expansion whose sub-queries all came back empty —
+  // the dud is cached per (query, model), so left in place it deterministically
+  // replays the same misses on every warm repeat. Only judge sub-queries the
+  // store could actually run: on FTS-only stores, vec/hyde expansions never
+  // execute and say nothing about the expansion's quality.
+  if (expanded.length > 0) {
+    const runnable = expanded.filter(q => q.type === "lex" || hasVectors);
+    const expansionContributed = rankedListMeta.some(m => m.queryType !== "original");
+    if (runnable.length > 0 && !expansionContributed) {
+      store.invalidateExpansionCache(query);
+    }
+  }
+
   // Step 4: RRF fusion — original-query FTS and vector lists get 2x weight;
   // expansion-derived lists stay at 1x independent of insertion order.
   const weights = getHybridRrfWeights(rankedListMeta);
@@ -5546,7 +5583,7 @@ export async function vectorSearchQuery(
 
   // Expand query — filter to vec/hyde only (lex queries target FTS, not vector)
   const expandStart = Date.now();
-  const allExpanded = await store.expandQuery(query, undefined, intent);
+  const allExpanded = await store.expandQuery(query);
   const vecExpanded = allExpanded.filter(q => q.type !== 'lex');
   options?.hooks?.onExpand?.(query, vecExpanded, Date.now() - expandStart);
 
