@@ -48,6 +48,33 @@
 - Test suite expanded: Vaporetto tokenization, CJK FTS, concurrent store
   initialization, ONNX provider routing, and bin wrapper behavior
 
+- Quoted FTS phrases containing dotted tokens (e.g. `"1.0.21"`) now match the
+  indexed document. The porter unicode61 tokenizer stores dotted strings as
+  adjacent parts, but phrase sanitization stripped the dots into a single
+  token (`1021`) that could never hit. Dotted tokens inside quotes are split
+  into adjacent phrase terms, matching the bare-term rewrite from #563 (#757).
+
+- `scripts/build.mjs` no longer passes `shell: true` to `spawnSync` on Windows.
+  With the default Node install path (`C:\Program Files\nodejs\node.exe`),
+  `cmd.exe` split the unquoted `process.execPath` at the space, the `tsc`
+  spawn failed, and `prepare` could still report success with no `dist/` —
+  leaving `bin/qmd` at "not built". The helper always receives a real binary
+  path plus an args array, so no shell is needed. A spawn error now prints
+  the missing binary path instead of failing silently. (#681)
+
+- Case-sensitive collections no longer collapse distinct document identities that
+  differ only by path casing. The implicit `COLLATE NOCASE` legacy migration was
+  unsafe for filesystems that contain both `README.md` and `readme.md`; case-only
+  legacy migrations must now be explicit and operator-reviewed (#801).
+
+- `cleanupOrphanedVectors` now runs its orphan count and both DELETEs in a
+  single immediate transaction. An interruption between the two DELETEs
+  (crash, `SQLITE_BUSY`) could desync `vectors_vec` from `content_vectors`,
+  leaving stale metadata rows that make a later reactivation of the same
+  content hash look already-embedded — so `qmd embed` skips it and the
+  document becomes silently unsearchable by vector, with no orphan left to
+  clean up (#766).
+
 - `qmd embed` no longer splits a UTF-16 surrogate pair (emoji, etc.) across a
   chunk boundary. A chunk ending or starting mid-pair produced an unpaired
   surrogate in the chunk text, which some remote embedding APIs reject as
