@@ -48,6 +48,117 @@
 - Test suite expanded: Vaporetto tokenization, CJK FTS, concurrent store
   initialization, ONNX provider routing, and bin wrapper behavior
 
+- `qmd embed` no longer splits a UTF-16 surrogate pair (emoji, etc.) across a
+  chunk boundary. A chunk ending or starting mid-pair produced an unpaired
+  surrogate in the chunk text, which some remote embedding APIs reject as
+  invalid JSON — permanently failing that chunk on every retry, since the
+  boundary calculation is deterministic. This covers both the character-based
+  chunker and `chunkDocumentByTokens`'s recursive re-splitting for
+  astral-plane-dense content, which could previously drive the char budget
+  low enough to reproduce the same split (#777).
+
+- `insertContext` looks up `store_collections` by name. #754 retargeted the
+  query from the dropped `collections` table but left `WHERE id = ?`, and
+  `store_collections` has `name TEXT PRIMARY KEY` with no `id` column — the
+  call threw `no such column: id`. Matches `deleteContext` /
+  `updateStoreContext` (#853).
+
+- `qmd collection add` with no path argument now errors with usage instead of
+  silently indexing the current working directory (#684). Pass `.` to index
+  CWD, matching the documented examples.
+
+- `qmd status` reports orphaned embedding chunks, `qmd update` hints when they
+  exceed 10% of vectors, and `qmd cleanup --dry-run` previews what would be
+  removed. Incremental update still does not auto-prune vectors (a transient
+  empty mount would otherwise force a full re-embed) (#768).
+
+- `qmd --index <name> mcp --http --daemon` now scopes PID/log files per index
+  (`mcp-<name>.pid`) and passes the resolved database path to the child, so a
+  named-index daemon no longer collides with the default `mcp.pid` or opens
+  the default store (#772).
+
+- Opening a store no longer throws `SQLiteError: no such column: T.name` when
+  `documents_fts` is still the legacy `fts5(name, body, content='documents')`
+  schema. `CREATE VIRTUAL TABLE IF NOT EXISTS` left that table in place, and
+  the CJK FTS rebuild's `DELETE FROM documents_fts` compiled against
+  `documents.name`, which does not exist (#792).
+
+- Rerank cache keys now include the resolved `models.rerank` URI, so swapping
+  the configured reranker no longer serves the previous model's cached scores
+  (#764).
+
+- `vsearch -c <collection>` no longer returns empty results for small
+  collections crowded out of the global ANN candidate pool. `searchVec` now
+  exact-scans the collection's vectors with `vec_distance_cosine` when the
+  set is within 20k rows (ANN + post-filter cannot see collections that never
+  enter global top-k, and sqlite-vec caps `k` at 4096 so a larger multiplier
+  alone is not enough). Larger collections still use capped ANN over-fetch
+  (#791, #803).
+
+- `multi-get --format files` now emits the docid as its own CSV field
+  (`#docid,path,...`) instead of prepending it into the path field with a
+  space (`#docid path,...`), matching `search --format files` and keeping
+  naive comma-splitting usable (#760).
+
+- `qmd embed` now takes an exclusive process lock (`.qmd-embed.lock` next to
+  the index DB) so concurrent invocations no longer race on `vectors_vec`
+  and fail with `UNIQUE constraint failed: vectors_vec.hash_seq`. A second
+  embed exits early with `Another embed process is already running. Skipping.`
+  Stale locks from crashed processes are recovered via PID identity checks
+  (#825).
+
+- windows prepare fix #778 keeps dist build #824
+
+- `qmd mcp` (stdio) now shuts down gracefully when stdin reaches EOF instead
+  of orphaning to PID 1 when the parent MCP client dies (#751): the server
+  closes its transport, gives in-flight request handlers a bounded window to
+  settle, closes the store (which disposes its llama.cpp instance), and lets
+  the process drain via `process.exitCode` (no forced `process.exit()`, which
+  has caused exit-time native crashes before).
+
+- `qmd --version` no longer reports an unrelated repository's commit (#787).
+  The commit was discovered at runtime with `git -C <installDir> rev-parse`,
+  and `git -C` walks *up*, so any install nested inside another checkout
+  reported that checkout's HEAD — a global npm install under a git-managed
+  prefix such as Homebrew's `/opt/homebrew` claimed Homebrew's commit as
+  qmd's. Identical tarballs reported different "commits" depending only on
+  where they were installed, which is why one issue can collect three distinct
+  hashes for the same published build. `scripts/build.mjs` now stamps the
+  commit it built from into `dist/cli/build-info.json` (suffixed `-dirty` when
+  built from a modified tree), and the runtime prefers that. Source checkouts
+  still resolve their own HEAD, but only after confirming the enclosing
+  repository is qmd's; anything else reports no commit rather than a
+  misleading one. The lookup also no longer interpolates the install path into
+  a shell string, so a path containing a space stops silently dropping the
+  commit, and `--version` from a build runs no subprocess at all.
+
+- `qmd doctor` no longer false-positives `.etag` HTTP sidecars (written by
+  `qmd pull` next to each download) as invalid GGUF models. The model-cache
+  check now only inspects real `.gguf` files, so a sidecar that happens to
+  sort before the blob no longer poisons the report. #812
+
+- `qmd mcp stop` and `qmd mcp --http --daemon` now verify that a pidfile PID still belongs to a qmd process before signalling it or refusing to start. Recycled PIDs (common after reboot) are treated as stale: the pidfile is unlinked instead of SIGTERM'ing an unrelated process or blocking daemon start with a false "Already running" error (#806).
+
+- `qmd collection add` now rejects missing paths and regular files before
+  creating collection configuration or index state. The error reports both the
+  received and resolved path so malformed shell arguments can be corrected.
+
+- Claude Code plugin: scope the plugin `source` to `./skills` so installs
+  copy just the skills (~50 KB) instead of the entire repository. Previously a
+  canonical install materialized ~230 MB / 9,000+ items into
+  `~/.claude/plugins/cache/` — including a full npm dependency install
+  triggered by the repo-root `package.json`. Both skills (`qmd` and `release`)
+  still ship, unchanged. (#790)
+
+- Claude Code plugin: releases now bump the plugin version in
+  `.claude-plugin/marketplace.json` in lockstep with `package.json`. The
+  plugin cache is keyed on this version, and it had been stuck at `0.1.0`
+  since February — so installed plugins never received skill updates
+  (users who installed in February are still being served that snapshot
+  today, despite the qmd skill nearly tripling in size since). Also bumps
+  the plugin to `2.6.3` as a one-time catch-up so existing installs pick
+  up the current skill on their next `claude plugin update`. (#789)
+
 ### Changed
 
 - `--full-path` no longer degrades silently when a result cannot be resolved on
