@@ -28,7 +28,24 @@ An on-device search engine for everything you need to remember. Index your markd
 
 qmd-ja combines BM25 full-text search, vector semantic search, and LLM re-ranking — with Japanese morphological tokenization and Japanese-optimized models replacing the upstream defaults.
 
-![QMD Architecture](assets/qmd-architecture.png)
+```mermaid
+flowchart LR
+  Q[User Query] --> X[Query Expansion]
+  Q --> FTS[BM25 Search]
+  Q --> VS[Vector Search]
+  X --> HYDE[HyDE]
+  X --> VEC[Vec dense sentences]
+  X --> LEX[Lex BM25 keywords]
+  HYDE --> VS
+  VEC --> VS
+  LEX --> FTS
+  VS --> RRF[Reciprocal Rank Fusion]
+  FTS --> RRF
+  RRF --> RR[LLM Reranker]
+  RR --> OUT[Final ranked results]
+```
+
+Typed expansions are routed exclusively: `lex` → BM25/FTS, `vec` and `hyde` → vector search. The original query is sent to both backends, then fused with RRF and reranked.
 
 > **qmd-ja note:** The architecture diagram reflects the upstream pipeline. In qmd-ja, the BM25 tokenizer is replaced with Vaporetto WASM morphological analysis, and the default models are replaced with Japanese-optimized alternatives. See [Japanese Optimization](#japanese-optimization) for details.
 
