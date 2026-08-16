@@ -48,6 +48,173 @@
 - Test suite expanded: Vaporetto tokenization, CJK FTS, concurrent store
   initialization, ONNX provider routing, and bin wrapper behavior
 
+- `qmd pull` (and implicit model downloads in `embed`/`query`) no longer print
+  node-llama-cpp's download progress bar. The bar redraws every few kilobytes
+  and flooded agent transcripts with thousands of tokens (#776). Pass
+  `qmd pull --progress` to show it on an interactive terminal.
+- `--full-path` no longer degrades silently when a result cannot be resolved on
+  disk (#785). A fallback there means the file moved or was deleted since the
+  last index, so `search`, `query`, `get` and `multi-get` now print a notice to
+  stderr naming how many results fell back and suggesting `qmd update`; stdout
+  stays machine-readable.
+- `search`/`query` now decide per result whether to show the docid under
+  `--full-path`, matching `multi-get` and `get`: a result that resolved shows
+  its on-disk path and no docid, one that did not keeps its `qmd://` URI *and*
+  its docid, so it is still addressable. Previously the docid was dropped for
+  every row whenever the flag was set, leaving unresolved rows with neither a
+  usable path nor an identifier.
+- `search --format csv` always emits the `docid` column, empty for rows that
+  resolved to an on-disk path. Under `--full-path` the header previously
+  dropped the column entirely — which also disagreed with the empty-result
+  header, always printed with `docid`. Column positions are now stable across
+  runs and formats.
+
+### Fixed
+
+- Concurrent first-open of a cold index no longer fails with
+  `table documents_fts already exists` on Bun/macOS. FTS5
+  `CREATE VIRTUAL TABLE IF NOT EXISTS` is not atomic across WAL
+  connections: two processes can both see a missing table on their
+  schema snapshot and the loser throws. Table create and legacy-schema
+  repair now use the same `BEGIN IMMEDIATE` + double-check as the FTS
+  sync triggers, and treat a concurrent "already exists" as success
+  when the table is present.
+
+- Nix flake `qmd-node-modules` FOD hashes updated for x86_64-linux and
+  aarch64-darwin after the MCP SDK 2.0 bump. `nix build` / Nix GHA was
+  failing with a fixed-output hash mismatch.
+
+- CJK FTS rebuild no longer skips leftover `fts5(name, body, content='documents')`
+  tables when `fts_cjk_normalized_version` is already stamped, and schema
+  repair now checks live FTS columns (`PRAGMA table_info`) as well as
+  `sqlite_master.sql`. The MCP HTTP test helper still seeds that legacy
+  table; `startMcpHttpServer` / `createStore` on it must not throw
+  `no such column: T.name` (#792 regression).
+
+- `qmd collection add --glob` is no longer silently ignored. parseArgs ran
+  with `strict: false`, so OpenClaw's `--glob memory.md` (and any other
+  `--glob`) fell through, the default `**/*.md` was used, and a second
+  collection on the same path collided as a duplicate instead of indexing
+  the requested mask (#536). `--glob` is now an alias for `--mask`.
+
+- The `bin/qmd` trampoline now execs `process.execPath` instead of
+  re-resolving `node` from PATH. Native addons (`better-sqlite3`) are
+  compiled for the Node that installed qmd; a version manager (nvm, fnm,
+  mise) selecting a different major in the working directory used to spawn
+  that other binary and fail with `NODE_MODULE_VERSION` / `ERR_DLOPEN_FAILED`
+  (#577 leftover; #319). `bun bin/qmd` still resolves `node` from PATH so
+  Node-ABI addons are not loaded into bun.
+
+- `qmd update` / `qmd collection add` no longer swallow unreadable files
+  silently (#460). `readFileSync` failures (ETIMEDOUT on APFS compressed
+  files, EAGAIN, EACCES, …) still skip the file so the rest of the collection
+  indexes, but the CLI now warns with the path and error code and reports
+  the skip count. The SDK `update()` result includes `skipped`.
+
+- The architecture diagram no longer draws Vec expansions into BM25 search
+  (#680). `lex` expansions are FTS-only; `vec` and `hyde` expansions are
+  vector-only. The original query still goes to both backends.
+
+- `qmd bench` no longer runs to a wall of 0.00 when the fixture collection is
+  missing or empty (#716). It errors up front with the same "Collection not
+  found" / index hint as `qmd search -c`, and if every backend still scores
+  zero it warns on stderr to check `qmd ls`.
+
+- `qmd cleanup` now reclaims the content and FTS space left behind after a
+  wrong-directory `qmd update`. Deactivating files (the next update in the
+  right directory) only tombstoned the `documents` rows; cleanup deleted those
+  rows and vacuumed, but never dropped the unreferenced `content` hashes and
+  never ran FTS5 `optimize`, so `documents_fts_data` kept the old bodies
+  (#550). Cleanup now deletes inactive docs, then orphaned content, then
+  compact FTS, then vacuum. `--dry-run` reports the content hashes too.
+
+- Concurrent `query` calls with `rerank: true` on a cold MCP server no longer
+  race `ensureRerankContexts()`. Embed already serialized context creation;
+  rerank did not, so two overlapping first queries both saw an empty pool,
+  both created ranking contexts, and the inactivity timer disposed the loser
+  (`Object is disposed`, #682). Callers now await the in-flight create.
+
+- Embedding-context pool size no longer assumes every GGUF costs 150 MB of
+  VRAM (the nomic-embed figure). Larger models such as Qwen3-Embedding-0.6B
+  are ~1190 MB per 2048-token context; opening 8 of those exhausted an 8 GB
+  card so `qmd query` failed with `Failed to create any rerank context` even
+  though the reranker itself was fine. The pool is now sized from the weight
+  file, and 1 GB is reserved for the reranker (#799). Default
+  embeddinggemma/nomic throughput is unchanged. `QMD_EMBED_PARALLELISM` still
+  overrides.
+
+- Multi-collection `-c A -c B` (and SDK/MCP `collections: [A, B]`) no longer
+  searches globally then post-filters. A large unrelated collection could fill
+  the FTS/ANN top-k so the requested collections vanished, yielding false-empty
+  results even though each collection matched on its own. `searchFTS` /
+  `searchVec` now search each requested collection, then merge by score
+  (#775). Single-collection exact-scan (#791, #803) is unchanged.
+
+- Query expansion no longer consumes caller `intent`, and a cached expansion
+  whose sub-queries all miss is dropped instead of replaying forever (#818).
+  Intent still steers reranking and snippet/chunk selection; it just no longer
+  enters the expansion prompt or cache key, where the model copied meta-language
+  ("so I can compare spend settings") into lex/vec terms that matched nothing.
+
+- Files whose names differ only in the characters the legacy slug collapsed to
+  `-` (spaces, underscores) no longer evict each other from the index (#717).
+  The handalized-path migration now skips any row whose path is still owned by
+  a file in the current scan, so it only adopts genuinely stale pre-2.6 rows.
+  `qmd get` and `qmd ls <prefix>` also match `_` and `%` in paths literally
+  instead of as SQL `LIKE` wildcards, so `qmd get 2026_06_16.md` no longer
+  returns a sibling `2026-06-16.md`.
+
+- CLI `multi-get` and SDK/MCP `multi_get` now share one comma-list resolver.
+  Collection-prefixed paths (`qmd/docs/SYNTAX.md`) work in both transports,
+  unanchored `LIKE '%name'` no longer silently fetches a different document
+  for a filename fragment (`NTAX.md` ≠ `SYNTAX.md`), and ambiguous names
+  across collections error with the candidate list instead of `LIMIT 1` (#759).
+
+- The Nix flake wrapper now seeds the same pre-import env as `bin/qmd`.
+  Nix installs exec `bun src/cli/qmd.ts` directly, so they previously skipped
+  the launcher: `qmd mcp` could leak llama/ggml native logs onto JSON-RPC
+  stdio, and Darwin CLI exits dumped a ggml Metal residency-set stack trace
+  after an otherwise successful query. The wrapper now quiets those logs for
+  `mcp` and sets `GGML_METAL_NO_RESIDENCY=1` on Darwin unless
+  `QMD_METAL_KEEP_RESIDENCY=1` (#723).
+
+- Rerank context creation no longer swallows the real failure. A VRAM OOM or
+  corrupt model previously produced only `Reranker unavailable — skipping
+  reranking` (and a dead identical retry whose comment claimed it disabled
+  flash attention, which ranking contexts never supported). The warning now
+  includes the underlying message so the two cases are distinguishable (#782).
+
+- The Nix flake package now ships `skills/` next to `src/` in `$out/lib/qmd/`.
+  `findPackageRoot()` walks up from the wrapped `src/cli/qmd.ts` looking for a
+  sibling `skills/` directory; without it, `qmd skill show` and `qmd skills list`
+  always failed with "QMD skill not found" on Nix-installed binaries (#722).
+
+- `/release` step 1 no longer points at a missing script. `skills/release/scripts/release-context.sh`
+  now exists: it silently installs git hooks and prints version info, working-tree
+  status, commits and files since the last tag, `[Unreleased]`, and the previous
+  changelog entry. The skill's process list also drops the duplicate step 7 and
+  checks dependency updates before cutting the release (#796).
+
+- `store.searchVec()` (and SDK `searchVector()`) now embed the query with the
+  store's pinned embed model instead of the global `QMD_EMBED_MODEL`. A store
+  created with a non-default `models.embed` previously failed with
+  `Dimension mismatch ... Expected N ... received M` and loaded the wrong
+  (often much larger) model at query time. Hybrid/precomputed/session search
+  paths were unaffected and stay unchanged (#690).
+
+- `qmd collection add --mask "a.md,*.txt"` now indexes the union of each
+  pattern. The comma-separated form was documented and commonly guessed, but
+  the joined string was passed to fast-glob as one literal glob, so it
+  matched zero files with no error. Brace form `{a.md,*.txt}` is unchanged.
+  The same split applies on `qmd update` for stored comma-list masks (#557).
+
+- NixOS / immutable-root installs no longer crash `qmd embed` with EACCES
+  when node-llama-cpp tries to compile llama.cpp into a read-only
+  `node_modules`. The flake wrapper puts Nix's glibc and libstdc++ on
+  `LD_LIBRARY_PATH` so prebuilt binaries can `dlopen` them, and
+  `getLlama()` uses `build: "never"` when the llama directory is not
+  writable (#574).
+
 - CJK FTS rebuild no longer raises "database is busy" when flushing insert
   batches. The streaming `.iterate()` cursor stayed open across
   `BEGIN` on the same connection; the scan now uses keyset-paginated
