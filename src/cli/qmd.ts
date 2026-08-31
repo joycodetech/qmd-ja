@@ -2646,7 +2646,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
     structured: !!parsed,
     limit: opts.all ? 500 : (opts.limit || 10),
     minScore: opts.minScore || 0,
-    collection: singleCollection,
+    collection: collectionSearchFilter(collectionNames),
     intent,
   });
 
