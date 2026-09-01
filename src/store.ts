@@ -4658,11 +4658,18 @@ export async function rerank(query: string, documents: { file: string; text: str
     const rerankResult = await rerankProvider.rerank(rerankQuery, uncachedDocs, { model: rerankModel });
 
     // Cache results by chunk text so identical chunks across files are scored once.
+    // Skip caching when the provider fell back to a neutral score (e.g. rerank
+    // context creation failed) — persisting that under the real model's cache
+    // key would make the fallback permanent even after the underlying issue
+    // (VRAM pressure, driver crash, etc.) resolves.
     const textByFile = new Map(uncachedDocs.map(d => [d.file, d.text]));
+    const isFallback = rerankResult.model === "fallback";
     for (const result of rerankResult.results) {
       const chunk = textByFile.get(result.file) || "";
-      const cacheKey = getCacheKey("rerank", { query: rerankQuery, model: rerankModel, chunk });
-      setCachedResult(db, cacheKey, result.score.toString());
+      if (!isFallback) {
+        const cacheKey = getCacheKey("rerank", { query: rerankQuery, model: rerankModel, chunk });
+        setCachedResult(db, cacheKey, result.score.toString());
+      }
       cachedResults.set(chunk, result.score);
     }
   }
