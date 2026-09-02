@@ -28,7 +28,24 @@ An on-device search engine for everything you need to remember. Index your markd
 
 qmd-ja combines BM25 full-text search, vector semantic search, and LLM re-ranking — with Japanese morphological tokenization and Japanese-optimized models replacing the upstream defaults.
 
-![QMD Architecture](assets/qmd-architecture.png)
+```mermaid
+flowchart LR
+  Q[User Query] --> X[Query Expansion]
+  Q --> FTS[BM25 Search]
+  Q --> VS[Vector Search]
+  X --> HYDE[HyDE]
+  X --> VEC[Vec dense sentences]
+  X --> LEX[Lex BM25 keywords]
+  HYDE --> VS
+  VEC --> VS
+  LEX --> FTS
+  VS --> RRF[Reciprocal Rank Fusion]
+  FTS --> RRF
+  RRF --> RR[LLM Reranker]
+  RR --> OUT[Final ranked results]
+```
+
+Typed expansions are routed exclusively: `lex` → BM25/FTS, `vec` and `hyde` → vector search. The original query is sent to both backends, then fused with RRF and reranked.
 
 > **qmd-ja note:** The architecture diagram reflects the upstream pipeline. In qmd-ja, the BM25 tokenizer is replaced with Vaporetto WASM morphological analysis, and the default models are replaced with Japanese-optimized alternatives. See [Japanese Optimization](#japanese-optimization) for details.
 
@@ -194,7 +211,31 @@ runs in a container and a liveness probe connects from a non-loopback address.
 
 The HTTP server exposes two endpoints:
 - `POST /mcp` — MCP Streamable HTTP (JSON responses, stateless)
+- `POST /query` (alias `/search`) — structured search without the MCP protocol
 - `GET /health` — liveness check with uptime
+
+
+##### Origin and Host validation
+
+Every request is screened before routing: a request carrying an `Origin` header
+that does not name a loopback address is rejected with `403`, as is a `Host`
+header naming something other than the address the server is bound to. This is
+what stops a web page you visit from reading your index through DNS rebinding —
+loopback binding alone does not, since the browser makes the request from your
+own machine.
+
+Requests without an `Origin` header — curl, MCP clients, editors — are
+unaffected, which covers every normal local client.
+
+| Variable | Effect |
+|----------|--------|
+| `QMD_ALLOWED_ORIGINS` | Comma-separated origins to accept in addition to loopback, e.g. `https://notes.internal`. Set to `*` to disable the check entirely. |
+| `QMD_ALLOWED_HOSTS` | Comma-separated `Host` values to accept in addition to loopback and the bind address. |
+
+`--host 0.0.0.0` cannot know which `Host` values are legitimate, so it skips the
+host check and warns at startup. Set `QMD_ALLOWED_HOSTS` to re-enable it, and
+remember the endpoints are unauthenticated — put your own auth in front of a
+server that is reachable off-host.
 
 LLM models stay loaded in VRAM across requests. Embedding/reranking contexts are disposed after 5 min idle and transparently recreated on the next request (~1s penalty, models remain loaded).
 
@@ -674,6 +715,9 @@ qmd-ja collection add . --name myproject
 # Create a collection with explicit path and custom glob mask
 qmd-ja collection add ~/Documents/notes --name notes --mask "**/*.md"
 
+# Comma-separated masks are a union (brace form `{a,b}` also works)
+qmd collection add ~/notes --name notes --mask "sources/**/*.md,CO - *.md"
+
 # List all collections
 qmd-ja collection list
 
@@ -809,7 +853,7 @@ collections:
 | `editor_uri` (alias `editor_uri_template`) | top-level | Hyperlink template for clickable result paths; `QMD_EDITOR_URI` overrides. |
 | `models.embed` / `.rerank` / `.generate` | top-level | HuggingFace GGUF URIs (`hf:<user>/<repo>/<file>`) overriding the built-in defaults per role. |
 | `collections.<name>.path` | per-collection | Absolute directory to index. |
-| `collections.<name>.pattern` | per-collection | Glob mask. Set via `qmd collection add --mask`. Default `**/*.md`. |
+| `collections.<name>.pattern` | per-collection | Glob mask. Set via `qmd collection add --mask`. Default `**/*.md`. Comma-separated lists and brace groups (`{a,b}`) are a union of patterns. |
 | `collections.<name>.ignore` | per-collection | Glob patterns excluded from indexing — useful to stop nested collections double-indexing. **YAML-only — no CLI command sets this.** Additive with QMD's built-in exclusions (`node_modules`, `.git`, `.cache`, `vendor`, `dist`, `build`), which you cannot un-ignore. |
 | `collections.<name>.update` | per-collection | Bash command run before `qmd update` re-indexes this collection. Set via `qmd collection update-cmd`. |
 | `collections.<name>.includeByDefault` | per-collection | Whether unscoped queries search it. Toggle with `qmd collection include`/`exclude`. Default `true`. |
@@ -849,6 +893,37 @@ re-indexed. Set or clear it from the CLI instead of editing YAML by hand:
 qmd collection update-cmd wiki 'git pull --ff-only'   # set
 qmd collection update-cmd wiki                         # clear
 ```
+
+##### Checked-in `.qmd` config is not trusted by default
+
+A project-local `.qmd/index.yml` travels with a `git clone`, and QMD adopts it
+automatically for any command run inside the tree. Three fields in that file can
+reach outside the project, and QMD will not use them unattended:
+
+- `update` commands — somebody else's shell script, run by `qmd update`
+- `collections.*.path` pointing **outside** the project directory
+- `models.embed` / `models.rerank` / `models.generate` other than the built-in
+  defaults (any `hf:` repo or local GGUF path)
+
+In-project collection paths (for example `./docs`) still index. On a terminal
+`qmd update` (and `qmd embed` / `qmd pull` / `qmd query`) lists the gated
+fields and asks. Approving records the approval in `~/.config/qmd/trusted.json`.
+With no terminal to ask — agents, CI, MCP — those fields are **skipped** and
+in-project indexing continues.
+
+Approvals cover the exact gated set you saw. Editing a command, pointing a
+collection outside the project, or changing a custom model URI asks again.
+
+```sh
+qmd trust           # review and approve this project's gated fields
+qmd trust list      # show every approved project config
+qmd trust revoke    # drop the approval for this project
+```
+
+Set `QMD_TRUST_LOCAL_CONFIG=1` (or `QMD_TRUST_UPDATE_HOOKS=1`) for CI that
+should allow them unattended. Your own `~/.config/qmd/*.yml` — including
+anything `qmd collection update-cmd` or `qmd collection add` writes — is
+never gated.
 
 ### Search Commands
 
@@ -892,6 +967,9 @@ and `deep-search` (→ `query`).
 --no-rerank        # Skip LLM reranking (RRF scores only; faster on CPU)
 -C, --candidate-limit <n>  # Max candidates to rerank (default: 40)
 --full-path        # Emit on-disk filesystem paths instead of qmd:// URIs
+                   # (a result whose file has moved or been deleted since
+                   #  indexing keeps its qmd:// URI + docid, and a notice is
+                   #  printed to stderr — run `qmd update` to refresh)
 
 # Output formats (for search and multi-get)
 --format <kind>    # cli (default) | json | csv | md | xml | files

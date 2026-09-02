@@ -32,7 +32,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "prepare": "[ -d .git ] && ./scripts/install-hooks.sh || true",
+    "prepare": "node scripts/install-hooks.mjs && node scripts/build.mjs",
     "build": "node scripts/build.mjs",
     "test": "node scripts/test-all.mjs",
     "test:types": "node ./node_modules/typescript/bin/tsc -p tsconfig.build.json --noEmit",
@@ -63,19 +63,19 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.5.0",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "@types/kuromoji": "^0.1.3",
-    "better-sqlite3": "12.10.0",
+    "better-sqlite3": "^13.0.3",
     "fast-glob": "3.3.3",
     "kuromoji": "^0.1.2",
-    "node-llama-cpp": "3.18.1",
-    "picomatch": "4.0.4",
+    "node-llama-cpp": "3.20.0",
+    "picomatch": "4.0.5",
     "sqlite-vec": "0.1.9",
     "tree-sitter-go": "0.25.0",
     "tree-sitter-python": "0.25.0",
     "tree-sitter-rust": "0.24.0",
     "tree-sitter-typescript": "0.23.2",
-    "web-tree-sitter": "0.26.8",
+    "web-tree-sitter": "0.26.12",
     "yaml": "2.9.0",
     "zod": "4.2.1"
   },
@@ -88,8 +88,8 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",
-    "tsx": "4.21.0",
-    "vitest": "3.2.4"
+    "tsx": "4.23.12",
+    "vitest": "3.2.7"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -97,7 +97,6 @@
       "esbuild",
       "node-llama-cpp",
       "tree-sitter-go",
-      "tree-sitter-javascript",
       "tree-sitter-python",
       "tree-sitter-rust",
       "tree-sitter-typescript"
@@ -127,5 +126,14 @@
     "llm"
   ],
   "author": "Koz Oda <oss@joycodetech.jp>",
-  "license": "MIT"
+  "license": "MIT",
+  "trustedDependencies": [
+    "node-llama-cpp",
+    "onnxruntime-node",
+    "protobufjs",
+    "tree-sitter-go",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust"
+  ]
 }
