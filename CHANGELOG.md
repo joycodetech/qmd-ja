@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## [2.8.3-ja.1] - 2026-09-03
+
+Sync with upstream `tobi/qmd` v2.8.3 (previous sync: 2026-06-29, v2.6.3-ja.1).
+
+### Security
+
+- Gate project-local collection paths and model URIs behind the trust prompt.
+- Verify Origin/Host on the MCP HTTP server and keep index paths inside the collection.
+- Stop running a checked-in `.qmd` config's update commands unattended.
+
+### MCP
+
+- Speak the stateless HTTP protocol (server/discover), added 2026-07-28.
+- Expire idle HTTP sessions with a configurable TTL.
+- Scope the HTTP daemon pidfile per `--index`; shut down gracefully on stdin EOF.
+
+### Japanese search (CJK FTS) reliability
+
+- Fix concurrent FTS table creation races and "database is busy" errors during CJK FTS rebuild.
+- Repair legacy/leftover FTS schema before CJK rebuild.
+- Fix UTF-16 surrogate pair splitting at chunk boundaries and dotted-token matching in quoted FTS phrases.
+
+### Embedding / reranking reliability
+
+- Bump `node-llama-cpp` to 3.20.0.
+- Fix rerank context creation races on cold start, embed context pool sizing, model download progress display, and rerank fallback handling.
+- Add an exclusive lock around embedding to prevent concurrent embed races.
+
+### CLI
+
+- Add `--glob` as an alias for `collection add --mask`; support comma-separated `--mask` globs.
+- Add orphaned-vector reclamation and `--dry-run` to `qmd cleanup`.
+- Fix `--full-path` silently degrading and native-addon ABI mismatches (spawn via `process.execPath`).
+
+### Build / compatibility
+
+- Bump `better-sqlite3` to 13.0.3.
+- Fix `npm install` and `tsc` compatibility on Windows.
+
 ## [2.6.3-ja.1] - 2026-06-29
 
 - The same project-local trust gate now covers collection `path` values that
