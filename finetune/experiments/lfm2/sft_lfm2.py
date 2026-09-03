@@ -68,6 +68,9 @@ config = SFTConfig(
     eval_strategy="steps",
     eval_steps=200,
 
+    # FIXME(transformers v5): warmup_ratio was dropped from TrainingArguments;
+    # this call will raise TypeError until switched to warmup_steps=0.03.
+    # Not fixed here — see PR #19 (train.py was fixed, this script wasn't).
     warmup_ratio=0.03,
     lr_scheduler_type="cosine",
     bf16=True,
