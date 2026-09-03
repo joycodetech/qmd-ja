@@ -127,7 +127,9 @@ def main():
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.grad_accum,
             learning_rate=args.lr,
-            warmup_ratio=0.03,
+            # transformers v5: TrainingArguments dropped warmup_ratio; warmup_steps now
+            # accepts a float (0-1) as a ratio.
+            warmup_steps=0.03,
             lr_scheduler_type="cosine",
             logging_steps=10,
             save_strategy="steps",

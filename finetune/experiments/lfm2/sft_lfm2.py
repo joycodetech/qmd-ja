@@ -68,7 +68,9 @@ config = SFTConfig(
     eval_strategy="steps",
     eval_steps=200,
 
-    warmup_ratio=0.03,
+    # transformers v5: TrainingArguments dropped warmup_ratio; warmup_steps now
+    # accepts a float (0-1) as a ratio.
+    warmup_steps=0.03,
     lr_scheduler_type="cosine",
     bf16=True,
 
