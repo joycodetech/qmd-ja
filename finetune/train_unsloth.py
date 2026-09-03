@@ -127,10 +127,9 @@ def main():
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.grad_accum,
             learning_rate=args.lr,
-            # FIXME(transformers v5): warmup_ratio was dropped from TrainingArguments;
-            # this call will raise TypeError until switched to warmup_steps=0.03.
-            # Not fixed here — see PR #19 (train.py was fixed, this script wasn't).
-            warmup_ratio=0.03,
+            # transformers v5: TrainingArguments dropped warmup_ratio; warmup_steps now
+            # accepts a float (0-1) as a ratio.
+            warmup_steps=0.03,
             lr_scheduler_type="cosine",
             logging_steps=10,
             save_strategy="steps",
