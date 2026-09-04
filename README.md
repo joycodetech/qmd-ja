@@ -920,6 +920,13 @@ qmd trust list      # show every approved project config
 qmd trust revoke    # drop the approval for this project
 ```
 
+> **Note**: This is easy to miss right after upgrading qmd-ja. If a project was
+> never explicitly trusted via an interactive `qmd trust` run, upgrading and then
+> invoking `qmd embed`/`qmd query` through a non-terminal caller (MCP, CI, an
+> agent) silently falls back to the built-in default models — no error, just a
+> `Skipping them — no terminal to confirm on.` line in the log. Symptom: embed
+> runs much slower than expected. Fix: run `qmd trust` once interactively.
+
 Set `QMD_TRUST_LOCAL_CONFIG=1` (or `QMD_TRUST_UPDATE_HOOKS=1`) for CI that
 should allow them unattended. Your own `~/.config/qmd/*.yml` — including
 anything `qmd collection update-cmd` or `qmd collection add` writes — is
