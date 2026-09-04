@@ -1920,6 +1920,105 @@ export class LlamaCpp implements LLM {
 // ONNX Reranker (@huggingface/transformers 経由)
 // =============================================================================
 
+export interface OnnxRuntimeDiagnostics {
+  runtime: string;
+  availableBackends: string[];
+  effectiveProvider: string;
+  note?: string;
+}
+
+/**
+ * Resolve the ONNX device to pass to Transformers.js pipelines.
+ *
+ * Defaults to CPU. Benchmarked on Windows + Intel iGPU (DirectML): embed
+ * (Ruri v3 310M) ~25.8ms CPU vs ~271.4ms dml, rerank (japanese-reranker
+ * xsmall) ~19.9ms CPU vs ~127.0ms dml -- DirectML was 6-10x slower for
+ * these small models with single-short-text inputs. This matches known
+ * ONNX Runtime behavior: small batches / small tensors on an integrated
+ * GPU lose to CPU because the CPU<->GPU transfer overhead outweighs the
+ * compute savings (see https://github.com/microsoft/onnxruntime/discussions/14168,
+ * a DirectML maintainer describing the same pattern).
+ *
+ * Set QMD_ONNX_DEVICE=auto (values: auto|gpu|dml|cuda) to opt into
+ * Transformers.js's platform auto-detection (DirectML on Windows, CUDA on
+ * Linux x64 with a CUDA runtime installed, CPU elsewhere) -- useful on
+ * machines with a discrete GPU or with larger custom models, where GPU may
+ * actually win. QMD_FORCE_CPU (already used to disable llama.cpp GPU
+ * offload) always wins over QMD_ONNX_DEVICE, keeping the two GPU toggles
+ * consistent.
+ */
+export function resolveOnnxDevice(
+  optInValue = process.env.QMD_ONNX_DEVICE,
+  forceCpuValue = process.env.QMD_FORCE_CPU,
+): "auto" | undefined {
+  const forceCpu = forceCpuValue?.trim().toLowerCase() ?? "";
+  if (forceCpu && !["false", "off", "none", "disable", "disabled", "0"].includes(forceCpu)) {
+    return undefined;
+  }
+
+  const optIn = optInValue?.trim().toLowerCase() ?? "";
+  if (!optIn || ["cpu", "false", "off", "none", "disable", "disabled", "0"].includes(optIn)) {
+    return undefined;
+  }
+  if (["auto", "gpu", "dml", "cuda"].includes(optIn)) {
+    return "auto";
+  }
+
+  process.stderr.write(`QMD Warning: invalid QMD_ONNX_DEVICE="${optInValue}", defaulting to CPU.\n`);
+  return undefined;
+}
+
+/**
+ * Report the ONNX Runtime backends visible to the current Node process.
+ *
+ * effectiveProvider reflects what resolveOnnxDevice() + the actually
+ * bundled backends (per onnxruntime-node's listSupportedBackends()) will
+ * produce, not a platform guess, so doctor output stays correct if
+ * onnxruntime-node's per-platform EP support changes in a future version.
+ */
+export async function getOnnxRuntimeDiagnostics(): Promise<OnnxRuntimeDiagnostics> {
+  try {
+    const ort = await import("onnxruntime-node");
+    const backends = typeof ort.listSupportedBackends === "function"
+      ? ort.listSupportedBackends()
+      : [];
+    const device = resolveOnnxDevice();
+    const gpuBackend = backends.find(
+      (backend: { name: string; bundled: boolean }) => backend.bundled && backend.name !== "cpu",
+    );
+
+    let effectiveProvider: string;
+    let note: string;
+    if (device !== "auto") {
+      effectiveProvider = "cpu";
+      note = gpuBackend
+        ? `ONNX models run on CPU by default (benchmarked faster than ${gpuBackend.name} for small models/short inputs). Set QMD_ONNX_DEVICE=auto to opt into GPU.`
+        : "ONNX models run on CPU (no GPU execution provider bundled for this platform).";
+    } else if (gpuBackend) {
+      effectiveProvider = gpuBackend.name;
+      note = `QMD_ONNX_DEVICE=auto is set; ONNX Runtime prioritizes ${gpuBackend.name} on this platform and falls back to CPU per-op if unsupported.`;
+    } else {
+      effectiveProvider = "cpu";
+      note = "QMD_ONNX_DEVICE=auto is set, but no GPU execution provider is bundled for this platform; ONNX models run on CPU.";
+    }
+
+    return {
+      runtime: "onnxruntime-node" + (ort.env?.versions?.node ? " " + ort.env.versions.node : ""),
+      availableBackends: backends.map((backend: { name: string }) => backend.name),
+      effectiveProvider,
+      note,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      runtime: "unavailable",
+      availableBackends: [],
+      effectiveProvider: "unknown",
+      note: message,
+    };
+  }
+}
+
 export function isOnnxRerankModel(uri: string): boolean {
   return uri.startsWith("onnx:");
 }
@@ -1960,6 +2059,7 @@ export class OnnxReranker {
         AutoModelForSequenceClassification.from_pretrained(this.modelId, {
           dtype: "fp32",
           model_file_name: this.modelFileName,
+          device: resolveOnnxDevice(),
         }),
       ]);
       this.tokenizer = tok;
@@ -2056,7 +2156,7 @@ export class OnnxEmbedder {
       this.extractorPipeline = await (pipeline as (task: string, model: string, opts: Record<string, unknown>) => Promise<unknown>)(
         "feature-extraction",
         this.modelId,
-        { dtype: this.dtype },
+        { dtype: this.dtype, device: resolveOnnxDevice() },
       );
     })();
 
