@@ -171,6 +171,8 @@ function getStore(): ReturnType<typeof createStore> {
         embedModel: modelsForLlm.embed,
         generateModel: modelsForLlm.generate,
         rerankModel: modelsForLlm.rerank,
+        expandChineseMarkers: config.queryExpansion?.contaminationMarkers,
+        expandMaxAttempts: config.queryExpansion?.maxAttempts,
       });
       setDefaultLlamaCpp(llm);
       store.llm = llm;

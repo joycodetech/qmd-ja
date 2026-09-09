@@ -43,6 +43,20 @@ export interface ModelsConfig {
 }
 
 /**
+ * Runtime guard config for query expansion (llm.ts expandQuery).
+ *
+ * Which characters "bleed through" as contamination is a property of the
+ * generate model, not of qmd itself, so this is intentionally left out of
+ * the code and configured per-environment. When unset, the guard is
+ * disabled and expandQuery behaves exactly as it did before this guard
+ * existed (single attempt, no retry).
+ */
+export interface QueryExpansionConfig {
+  contaminationMarkers?: string; // regex source, e.g. "[这那设为您们于与扩详军战]"
+  maxAttempts?: number;          // initial attempt + retries; default 1 (guard disabled)
+}
+
+/**
  * The complete configuration file structure
  */
 export interface CollectionConfig {
@@ -52,6 +66,7 @@ export interface CollectionConfig {
   logLevel?: "debug" | "info" | "warn" | "error" | "off";
   collections: Record<string, Collection>;    // Collection name -> config
   models?: ModelsConfig;
+  queryExpansion?: QueryExpansionConfig;
 }
 
 /**

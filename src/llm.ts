@@ -625,6 +625,23 @@ export type LlamaCppConfig = {
    * memory reclaim.
    */
   disposeModelsOnInactivity?: boolean;
+  /**
+   * Regex source string used to detect generate-model contamination (e.g. simplified
+   * Chinese characters bleeding into Japanese/English query expansion output) so
+   * expandQuery can retry instead of returning contaminated queryables.
+   *
+   * Which characters bleed through is a property of the generate model, not of qmd,
+   * so this is intentionally not hardcoded. Can also be set via QMD_EXPAND_ZH_MARKERS.
+   * When unset, the guard is disabled and expandQuery behaves exactly as it did before
+   * this guard existed (single attempt, no retry, zero added cost).
+   */
+  expandChineseMarkers?: string;
+  /**
+   * Max attempts (initial + retries) for expandQuery when expandChineseMarkers is set
+   * and contamination is detected. Default: 1 (no retry). Can also be set via
+   * QMD_EXPAND_MAX_ATTEMPTS.
+   */
+  expandMaxAttempts?: number;
 };
 
 /**
@@ -753,8 +770,11 @@ async function disposeSequenceThenContext(
   sequence: { dispose: () => void | Promise<void> } | undefined,
   context: { dispose: () => Promise<void> },
 ): Promise<void> {
-  if (sequence) await sequence.dispose();
-  await context.dispose();
+  try {
+    if (sequence) await sequence.dispose();
+  } finally {
+    await context.dispose();
+  }
 }
 
 async function disposeWithTimeout(resourceName: string, dispose: () => Promise<void>, timeoutMs = 1000): Promise<void> {
@@ -795,6 +815,45 @@ function resolveExpandContextSize(configValue?: number): number {
   return parsed;
 }
 
+// Guard disabled by default: undefined regex means expandQuery never checks for
+// contamination, so behavior/perf is identical to before this guard existed.
+const DEFAULT_EXPAND_MAX_ATTEMPTS = 1;
+
+function resolveExpandChineseMarkers(configValue?: string): RegExp | undefined {
+  const raw = configValue ?? process.env.QMD_EXPAND_ZH_MARKERS?.trim();
+  if (!raw) return undefined;
+
+  try {
+    return new RegExp(raw);
+  } catch (error) {
+    process.stderr.write(
+      `QMD Warning: invalid expandChineseMarkers pattern "${raw}" (${error instanceof Error ? error.message : String(error)}); contamination guard disabled.\n`
+    );
+    return undefined;
+  }
+}
+
+function resolveExpandMaxAttempts(configValue?: number): number {
+  if (configValue !== undefined) {
+    if (!Number.isInteger(configValue) || configValue <= 0) {
+      throw new Error(`Invalid expandMaxAttempts: ${configValue}. Must be a positive integer.`);
+    }
+    return configValue;
+  }
+
+  const envValue = process.env.QMD_EXPAND_MAX_ATTEMPTS?.trim();
+  if (!envValue) return DEFAULT_EXPAND_MAX_ATTEMPTS;
+
+  const parsed = Number.parseInt(envValue, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `QMD Warning: invalid QMD_EXPAND_MAX_ATTEMPTS="${envValue}", using default ${DEFAULT_EXPAND_MAX_ATTEMPTS}.\n`
+    );
+    return DEFAULT_EXPAND_MAX_ATTEMPTS;
+  }
+  return parsed;
+}
+
 const failedGpuInitModes = new Set<LlamaGpuMode>();
 let noGpuAccelerationWarningShown = false;
 let cpuForcedPrebuiltFallbackWarningShown = false;
@@ -818,6 +877,8 @@ export class LlamaCpp implements LLM {
   private rerankModelUri: string;
   private modelCacheDir: string;
   private expandContextSize: number;
+  private expandChineseMarkers: RegExp | undefined;
+  private expandMaxAttempts: number;
 
   // Ensure we don't load the same model/context concurrently (which can allocate duplicate VRAM).
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
@@ -851,6 +912,8 @@ export class LlamaCpp implements LLM {
     this.rerankModelUri = resolveRerankModel({ rerank: config.rerankModel });
     this.modelCacheDir = config.modelCacheDir || MODEL_CACHE_DIR;
     this.expandContextSize = resolveExpandContextSize(config.expandContextSize);
+    this.expandChineseMarkers = resolveExpandChineseMarkers(config.expandChineseMarkers);
+    this.expandMaxAttempts = resolveExpandMaxAttempts(config.expandMaxAttempts);
     this.inactivityTimeoutMs = config.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.disposeModelsOnInactivity = config.disposeModelsOnInactivity ?? false;
   }
@@ -1635,53 +1698,18 @@ export class LlamaCpp implements LLM {
       try {
         grammar = await llama.createGrammar({
           grammar: `
-          root ::= line+
-          line ::= type ": " content "\\n"
-          type ::= "lex" | "vec" | "hyde"
+          root ::= lexline lexline lexline vecline vecline hydeline
+          lexline ::= "lex: " content "\\n"
+          vecline ::= "vec: " content "\\n"
+          hydeline ::= "hyde: " hydecontent "\\n"
           content ::= [^\\n]+
+          hydecontent ::= [^\\n]{10,280}
         `
         });
       } finally {
         if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.grammar.end", { elapsedMs: Date.now() - grammarStart });
       }
 
-      // Create a bounded context for expansion to prevent large default VRAM allocations.
-      const contextStart = Date.now();
-      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.start");
-      try {
-        genContext = await this.generateModel!.createContext({
-          contextSize: this.expandContextSize,
-        });
-      } finally {
-        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.end", { elapsedMs: Date.now() - contextStart });
-      }
-      sequence = genContext.getSequence();
-      const { LlamaChatSession } = await loadNodeLlamaCpp();
-      const session = new LlamaChatSession({ contextSequence: sequence });
-
-      // Qwen3 recommended settings for non-thinking mode:
-      // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
-      // DO NOT use greedy decoding (temp=0) - causes infinite loops
-      const promptStart = Date.now();
-      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.start");
-      let result: string;
-      try {
-        result = await session.prompt(prompt, {
-          grammar,
-          maxTokens: 600,
-          temperature: 0.7,
-          topK: 20,
-          topP: 0.8,
-          repeatPenalty: {
-            lastTokens: 64,
-            presencePenalty: 0.5,
-          },
-        });
-      } finally {
-        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.end", { elapsedMs: Date.now() - promptStart });
-      }
-
-      const lines = result.trim().split("\n");
       const queryLower = query.toLowerCase();
       const queryTerms = queryLower.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
 
@@ -1691,15 +1719,99 @@ export class LlamaCpp implements LLM {
         return queryTerms.some(term => lower.includes(term));
       };
 
-      const queryables: Queryable[] = lines.map(line => {
-        const colonIdx = line.indexOf(":");
-        if (colonIdx === -1) return null;
-        const type = line.slice(0, colonIdx).trim();
-        if (type !== 'lex' && type !== 'vec' && type !== 'hyde') return null;
-        const text = line.slice(colonIdx + 1).trim();
-        if (!hasQueryTerm(text)) return null;
-        return { type: type as QueryType, text };
-      }).filter((q): q is Queryable => q !== null);
+      // Contamination guard: disabled (maxAttempts=1) unless expandChineseMarkers is
+      // configured, so environments/models that never configured it see identical
+      // behavior and cost to before this guard existed.
+      const zhMarkers = this.expandChineseMarkers;
+      const maxAttempts = zhMarkers ? this.expandMaxAttempts : 1;
+      const guardStart = Date.now();
+      let queryables: Queryable[] = [];
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const attemptStart = Date.now();
+
+        // Dispose the previous attempt's context/sequence before creating a fresh
+        // one - each retry gets an unpoisoned session rather than reusing chat
+        // history that may itself be steering the model toward contamination.
+        if (genContext) {
+          const previousContext = genContext;
+          const previousSequence = sequence;
+          genContext = undefined;
+          sequence = undefined;
+          await disposeSequenceThenContext(previousSequence, previousContext);
+        }
+
+        const contextStart = Date.now();
+        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.start", { attempt });
+        try {
+          genContext = await this.generateModel!.createContext({
+            contextSize: this.expandContextSize,
+          });
+        } finally {
+          if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.end", { attempt, elapsedMs: Date.now() - contextStart });
+        }
+        sequence = genContext.getSequence();
+        const { LlamaChatSession } = await loadNodeLlamaCpp();
+        const session = new LlamaChatSession({ contextSequence: sequence });
+
+        // Qwen3 recommended settings for non-thinking mode:
+        // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
+        // DO NOT use greedy decoding (temp=0) - causes infinite loops
+        const promptStart = Date.now();
+        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.start", { attempt });
+        let result: string;
+        try {
+          result = await session.prompt(prompt, {
+            grammar,
+            maxTokens: 600,
+            temperature: 0.7,
+            topK: 20,
+            topP: 0.8,
+            repeatPenalty: {
+              lastTokens: 64,
+              presencePenalty: 0.5,
+            },
+          });
+        } finally {
+          if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.end", { attempt, elapsedMs: Date.now() - promptStart });
+        }
+
+        const lines = result.trim().split("\n");
+        queryables = lines.map(line => {
+          const colonIdx = line.indexOf(":");
+          if (colonIdx === -1) return null;
+          const type = line.slice(0, colonIdx).trim();
+          if (type !== 'lex' && type !== 'vec' && type !== 'hyde') return null;
+          const text = line.slice(colonIdx + 1).trim();
+          if (!hasQueryTerm(text)) return null;
+          return { type: type as QueryType, text };
+        }).filter((q): q is Queryable => q !== null);
+
+        const contaminated = zhMarkers ? queryables.some(q => zhMarkers.test(q.text)) : false;
+
+        if (callId && zhMarkers) {
+          logQueryEvent(callId, contaminated ? "warn" : "debug", "llm.expandQuery.chineseGuard.attempt", {
+            attempt,
+            maxAttempts,
+            elapsedMs: Date.now() - attemptStart,
+            contaminated,
+          });
+        }
+
+        if (!contaminated) break;
+
+        if (attempt === maxAttempts) {
+          if (callId) {
+            logQueryEvent(callId, "warn", "llm.expandQuery.chineseGuard.exhausted", {
+              attempts: attempt,
+              totalElapsedMs: Date.now() - guardStart,
+            });
+          }
+          // Discard the still-contaminated result; fall through to the
+          // deterministic (non-LLM) fallback below instead of returning it.
+          queryables = [];
+        }
+      }
 
       // Filter out lex entries if not requested
       const filtered = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
