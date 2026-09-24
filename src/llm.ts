@@ -2146,6 +2146,28 @@ export function parseOnnxRerankUri(uri: string): { modelId: string; modelFileNam
   };
 }
 
+const ONNX_RERANK_MAX_TOKENS = 512;
+// Chunks are ~2,400 chars while the cross-encoder only sees 512 tokens.
+// Tokenizing the whole chunk and then truncating costs as much as inference
+// itself, so tokenize a character prefix first. 1,500 chars leaves margin past
+// the 512-token boundary for Japanese text (1,200 chars ≒ 512 tokens).
+export const ONNX_RERANK_PRECUT_CHARS = 1500;
+
+/**
+ * Encode a (query, document) pair for the ONNX cross-encoder.
+ * Tokenizes a character prefix of the document; if that prefix does not fill
+ * the token window, falls back to the full document so short-token-density
+ * texts produce the same input as before.
+ */
+export function encodeRerankPair(tokenizer: any, query: string, text: string, precutChars = ONNX_RERANK_PRECUT_CHARS): any {
+  const opts = { truncation: true, max_length: ONNX_RERANK_MAX_TOKENS, padding: true };
+  if (text.length > precutChars) {
+    const cut = tokenizer(query, { ...opts, text_pair: text.slice(0, precutChars) });
+    if (cut.input_ids.dims.at(-1) >= ONNX_RERANK_MAX_TOKENS) return cut;
+  }
+  return tokenizer(query, { ...opts, text_pair: text });
+}
+
 export class OnnxReranker {
   private modelId: string;
   private modelFileName: string;
@@ -2190,12 +2212,7 @@ export class OnnxReranker {
     const scored: RerankDocumentResult[] = [];
 
     for (const [i, doc] of documents.entries()) {
-      const encoded = tokenizer(query, {
-        text_pair: doc.text,
-        truncation: true,
-        max_length: 512,
-        padding: true,
-      });
+      const encoded = encodeRerankPair(tokenizer, query, doc.text);
       const output = await model(encoded);
       const logits: number[] = Array.from(output.logits.data as Float32Array);
       // CrossEncoder: logits[0] が関連スコア（sigmoid で [0,1] に変換）
