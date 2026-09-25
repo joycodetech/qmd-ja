@@ -35,6 +35,11 @@ import {
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { logQueryEvent } from "../src/logger.js";
+
+vi.mock("../src/logger.js", () => ({
+  logQueryEvent: vi.fn(),
+}));
 
 describe("model download progress (#776)", () => {
   test("pullModels hides node-llama-cpp CLI progress by default", async () => {
@@ -1423,6 +1428,151 @@ describe("LlamaCpp generate sequence dispose (node-llama-cpp 3.20)", () => {
       expect(sequence.dispose).toHaveBeenCalledTimes(1);
       expect(context.dispose).toHaveBeenCalledTimes(1);
       expect(order).toEqual(["sequence-start", "sequence-end", "context"]);
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+    }
+  });
+});
+
+describe("LlamaCpp expandQuery contamination guard", () => {
+  // vi.mocked() is not available under bun's vitest shim; cast instead.
+  const logMock = logQueryEvent as unknown as ReturnType<typeof vi.fn>;
+
+  function createHarness(
+    config: ConstructorParameters<typeof LlamaCpp>[0],
+    generatedResults: string[],
+  ) {
+    const promptResults = [...generatedResults];
+    const sequences: Array<{ dispose: ReturnType<typeof vi.fn> }> = [];
+    const contexts: Array<{
+      getSequence: ReturnType<typeof vi.fn>;
+      dispose: ReturnType<typeof vi.fn>;
+    }> = [];
+    const createContext = vi.fn(async () => {
+      const sequence = { dispose: vi.fn(async () => {}) };
+      const context = {
+        getSequence: vi.fn(() => sequence),
+        dispose: vi.fn(async () => {}),
+      };
+      sequences.push(sequence);
+      contexts.push(context);
+      return context;
+    });
+
+    const llm = new LlamaCpp(config) as any;
+    llm._ciMode = false;
+    llm.touchActivity = vi.fn();
+    llm.ensureLlama = vi.fn(async () => ({
+      createGrammar: vi.fn(async () => ({})),
+    }));
+    llm.ensureGenerateModel = vi.fn(async () => {});
+    llm.generateModel = { createContext };
+
+    setNodeLlamaCppModuleForTest({
+      LlamaLogLevel: { error: "error" },
+      resolveModelFile: vi.fn(),
+      LlamaChatSession: class {
+        async prompt() {
+          const result = promptResults.shift();
+          if (result === undefined) throw new Error("Unexpected extra expandQuery attempt");
+          return result;
+        }
+      } as any,
+      getLlama: vi.fn(),
+    });
+
+    return { llm, createContext, sequences, contexts };
+  }
+
+  test("without config or env, performs one attempt with the guard disabled", async () => {
+    const previousMarkers = process.env.QMD_EXPAND_ZH_MARKERS;
+    const previousMaxAttempts = process.env.QMD_EXPAND_MAX_ATTEMPTS;
+    delete process.env.QMD_EXPAND_ZH_MARKERS;
+    delete process.env.QMD_EXPAND_MAX_ATTEMPTS;
+    logMock.mockClear();
+
+    const harness = createHarness({}, ["vec: test query 这"]);
+    try {
+      const result = await harness.llm.expandQuery("test query", { callId: "guard-off" });
+
+      expect(result).toEqual([{ type: "vec", text: "test query 这" }]);
+      expect(harness.createContext).toHaveBeenCalledTimes(1);
+      expect(logMock.mock.calls.some(([, , event]) =>
+        event.startsWith("llm.expandQuery.chineseGuard."),
+      )).toBe(false);
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+      if (previousMarkers === undefined) delete process.env.QMD_EXPAND_ZH_MARKERS;
+      else process.env.QMD_EXPAND_ZH_MARKERS = previousMarkers;
+      if (previousMaxAttempts === undefined) delete process.env.QMD_EXPAND_MAX_ATTEMPTS;
+      else process.env.QMD_EXPAND_MAX_ATTEMPTS = previousMaxAttempts;
+    }
+  });
+
+  test("with markers configured, a clean first result does not retry", async () => {
+    logMock.mockClear();
+    const harness = createHarness(
+      { expandChineseMarkers: "[这]", expandMaxAttempts: 3 },
+      ["vec: test query clean"],
+    );
+    try {
+      const result = await harness.llm.expandQuery("test query", { callId: "guard-clean" });
+
+      expect(result).toEqual([{ type: "vec", text: "test query clean" }]);
+      expect(harness.createContext).toHaveBeenCalledTimes(1);
+      const attempts = logMock.mock.calls.filter(([, , event]) =>
+        event === "llm.expandQuery.chineseGuard.attempt",
+      );
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.[3]).toMatchObject({ attempt: 1, maxAttempts: 3, contaminated: false });
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+    }
+  });
+
+  test("retries a contaminated result and returns the clean second result", async () => {
+    logMock.mockClear();
+    const harness = createHarness(
+      { expandChineseMarkers: "[这]", expandMaxAttempts: 2 },
+      ["vec: test query 这", "vec: test query clean"],
+    );
+    try {
+      const result = await harness.llm.expandQuery("test query", { callId: "guard-retry" });
+
+      expect(result).toEqual([{ type: "vec", text: "test query clean" }]);
+      expect(harness.createContext).toHaveBeenCalledTimes(2);
+      expect(harness.sequences.every(sequence => sequence.dispose.mock.calls.length === 1)).toBe(true);
+      expect(harness.contexts.every(context => context.dispose.mock.calls.length === 1)).toBe(true);
+      const attempts = logMock.mock.calls.filter(([, , event]) =>
+        event === "llm.expandQuery.chineseGuard.attempt",
+      );
+      expect(attempts).toHaveLength(2);
+      expect(attempts.map(call => call[3]?.contaminated)).toEqual([true, false]);
+    } finally {
+      setNodeLlamaCppModuleForTest(null);
+    }
+  });
+
+  test("falls back deterministically and logs exhaustion when every attempt is contaminated", async () => {
+    logMock.mockClear();
+    const harness = createHarness(
+      { expandChineseMarkers: "[这]", expandMaxAttempts: 2 },
+      ["vec: test query 这", "hyde: test query 这"],
+    );
+    try {
+      const result = await harness.llm.expandQuery("test query", { callId: "guard-exhausted" });
+
+      expect(result).toEqual([
+        { type: "hyde", text: "Information about test query" },
+        { type: "lex", text: "test query" },
+        { type: "vec", text: "test query" },
+      ]);
+      expect(harness.createContext).toHaveBeenCalledTimes(2);
+      const exhausted = logMock.mock.calls.filter(([, , event]) =>
+        event === "llm.expandQuery.chineseGuard.exhausted",
+      );
+      expect(exhausted).toHaveLength(1);
+      expect(exhausted[0]?.[3]).toMatchObject({ attempts: 2 });
     } finally {
       setNodeLlamaCppModuleForTest(null);
     }

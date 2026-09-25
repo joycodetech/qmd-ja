@@ -625,6 +625,23 @@ export type LlamaCppConfig = {
    * memory reclaim.
    */
   disposeModelsOnInactivity?: boolean;
+  /**
+   * Regex source string used to detect generate-model contamination (e.g. simplified
+   * Chinese characters bleeding into Japanese/English query expansion output) so
+   * expandQuery can retry instead of returning contaminated queryables.
+   *
+   * Which characters bleed through is a property of the generate model, not of qmd,
+   * so this is intentionally not hardcoded. Can also be set via QMD_EXPAND_ZH_MARKERS.
+   * When unset, the guard is disabled and expandQuery behaves exactly as it did before
+   * this guard existed (single attempt, no retry, zero added cost).
+   */
+  expandChineseMarkers?: string;
+  /**
+   * Max attempts (initial + retries) for expandQuery when expandChineseMarkers is set
+   * and contamination is detected. Default: 1 (no retry). Can also be set via
+   * QMD_EXPAND_MAX_ATTEMPTS.
+   */
+  expandMaxAttempts?: number;
 };
 
 /**
@@ -753,8 +770,11 @@ async function disposeSequenceThenContext(
   sequence: { dispose: () => void | Promise<void> } | undefined,
   context: { dispose: () => Promise<void> },
 ): Promise<void> {
-  if (sequence) await sequence.dispose();
-  await context.dispose();
+  try {
+    if (sequence) await sequence.dispose();
+  } finally {
+    await context.dispose();
+  }
 }
 
 async function disposeWithTimeout(resourceName: string, dispose: () => Promise<void>, timeoutMs = 1000): Promise<void> {
@@ -795,6 +815,45 @@ function resolveExpandContextSize(configValue?: number): number {
   return parsed;
 }
 
+// Guard disabled by default: undefined regex means expandQuery never checks for
+// contamination, so behavior/perf is identical to before this guard existed.
+const DEFAULT_EXPAND_MAX_ATTEMPTS = 1;
+
+function resolveExpandChineseMarkers(configValue?: string): RegExp | undefined {
+  const raw = configValue ?? process.env.QMD_EXPAND_ZH_MARKERS?.trim();
+  if (!raw) return undefined;
+
+  try {
+    return new RegExp(raw);
+  } catch (error) {
+    process.stderr.write(
+      `QMD Warning: invalid expandChineseMarkers pattern "${raw}" (${error instanceof Error ? error.message : String(error)}); contamination guard disabled.\n`
+    );
+    return undefined;
+  }
+}
+
+function resolveExpandMaxAttempts(configValue?: number): number {
+  if (configValue !== undefined) {
+    if (!Number.isInteger(configValue) || configValue <= 0) {
+      throw new Error(`Invalid expandMaxAttempts: ${configValue}. Must be a positive integer.`);
+    }
+    return configValue;
+  }
+
+  const envValue = process.env.QMD_EXPAND_MAX_ATTEMPTS?.trim();
+  if (!envValue) return DEFAULT_EXPAND_MAX_ATTEMPTS;
+
+  const parsed = Number.parseInt(envValue, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `QMD Warning: invalid QMD_EXPAND_MAX_ATTEMPTS="${envValue}", using default ${DEFAULT_EXPAND_MAX_ATTEMPTS}.\n`
+    );
+    return DEFAULT_EXPAND_MAX_ATTEMPTS;
+  }
+  return parsed;
+}
+
 const failedGpuInitModes = new Set<LlamaGpuMode>();
 let noGpuAccelerationWarningShown = false;
 let cpuForcedPrebuiltFallbackWarningShown = false;
@@ -818,6 +877,8 @@ export class LlamaCpp implements LLM {
   private rerankModelUri: string;
   private modelCacheDir: string;
   private expandContextSize: number;
+  private expandChineseMarkers: RegExp | undefined;
+  private expandMaxAttempts: number;
 
   // Ensure we don't load the same model/context concurrently (which can allocate duplicate VRAM).
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
@@ -851,6 +912,8 @@ export class LlamaCpp implements LLM {
     this.rerankModelUri = resolveRerankModel({ rerank: config.rerankModel });
     this.modelCacheDir = config.modelCacheDir || MODEL_CACHE_DIR;
     this.expandContextSize = resolveExpandContextSize(config.expandContextSize);
+    this.expandChineseMarkers = resolveExpandChineseMarkers(config.expandChineseMarkers);
+    this.expandMaxAttempts = resolveExpandMaxAttempts(config.expandMaxAttempts);
     this.inactivityTimeoutMs = config.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.disposeModelsOnInactivity = config.disposeModelsOnInactivity ?? false;
   }
@@ -1635,53 +1698,18 @@ export class LlamaCpp implements LLM {
       try {
         grammar = await llama.createGrammar({
           grammar: `
-          root ::= line+
-          line ::= type ": " content "\\n"
-          type ::= "lex" | "vec" | "hyde"
+          root ::= lexline lexline lexline vecline vecline hydeline
+          lexline ::= "lex: " content "\\n"
+          vecline ::= "vec: " content "\\n"
+          hydeline ::= "hyde: " hydecontent "\\n"
           content ::= [^\\n]+
+          hydecontent ::= [^\\n]{10,280}
         `
         });
       } finally {
         if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.grammar.end", { elapsedMs: Date.now() - grammarStart });
       }
 
-      // Create a bounded context for expansion to prevent large default VRAM allocations.
-      const contextStart = Date.now();
-      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.start");
-      try {
-        genContext = await this.generateModel!.createContext({
-          contextSize: this.expandContextSize,
-        });
-      } finally {
-        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.end", { elapsedMs: Date.now() - contextStart });
-      }
-      sequence = genContext.getSequence();
-      const { LlamaChatSession } = await loadNodeLlamaCpp();
-      const session = new LlamaChatSession({ contextSequence: sequence });
-
-      // Qwen3 recommended settings for non-thinking mode:
-      // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
-      // DO NOT use greedy decoding (temp=0) - causes infinite loops
-      const promptStart = Date.now();
-      if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.start");
-      let result: string;
-      try {
-        result = await session.prompt(prompt, {
-          grammar,
-          maxTokens: 600,
-          temperature: 0.7,
-          topK: 20,
-          topP: 0.8,
-          repeatPenalty: {
-            lastTokens: 64,
-            presencePenalty: 0.5,
-          },
-        });
-      } finally {
-        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.end", { elapsedMs: Date.now() - promptStart });
-      }
-
-      const lines = result.trim().split("\n");
       const queryLower = query.toLowerCase();
       const queryTerms = queryLower.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
 
@@ -1691,15 +1719,99 @@ export class LlamaCpp implements LLM {
         return queryTerms.some(term => lower.includes(term));
       };
 
-      const queryables: Queryable[] = lines.map(line => {
-        const colonIdx = line.indexOf(":");
-        if (colonIdx === -1) return null;
-        const type = line.slice(0, colonIdx).trim();
-        if (type !== 'lex' && type !== 'vec' && type !== 'hyde') return null;
-        const text = line.slice(colonIdx + 1).trim();
-        if (!hasQueryTerm(text)) return null;
-        return { type: type as QueryType, text };
-      }).filter((q): q is Queryable => q !== null);
+      // Contamination guard: disabled (maxAttempts=1) unless expandChineseMarkers is
+      // configured, so environments/models that never configured it see identical
+      // behavior and cost to before this guard existed.
+      const zhMarkers = this.expandChineseMarkers;
+      const maxAttempts = zhMarkers ? this.expandMaxAttempts : 1;
+      const guardStart = Date.now();
+      let queryables: Queryable[] = [];
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const attemptStart = Date.now();
+
+        // Dispose the previous attempt's context/sequence before creating a fresh
+        // one - each retry gets an unpoisoned session rather than reusing chat
+        // history that may itself be steering the model toward contamination.
+        if (genContext) {
+          const previousContext = genContext;
+          const previousSequence = sequence;
+          genContext = undefined;
+          sequence = undefined;
+          await disposeSequenceThenContext(previousSequence, previousContext);
+        }
+
+        const contextStart = Date.now();
+        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.start", { attempt });
+        try {
+          genContext = await this.generateModel!.createContext({
+            contextSize: this.expandContextSize,
+          });
+        } finally {
+          if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.context.end", { attempt, elapsedMs: Date.now() - contextStart });
+        }
+        sequence = genContext.getSequence();
+        const { LlamaChatSession } = await loadNodeLlamaCpp();
+        const session = new LlamaChatSession({ contextSequence: sequence });
+
+        // Qwen3 recommended settings for non-thinking mode:
+        // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
+        // DO NOT use greedy decoding (temp=0) - causes infinite loops
+        const promptStart = Date.now();
+        if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.start", { attempt });
+        let result: string;
+        try {
+          result = await session.prompt(prompt, {
+            grammar,
+            maxTokens: 600,
+            temperature: 0.7,
+            topK: 20,
+            topP: 0.8,
+            repeatPenalty: {
+              lastTokens: 64,
+              presencePenalty: 0.5,
+            },
+          });
+        } finally {
+          if (callId) logQueryEvent(callId, "debug", "llm.expandQuery.prompt.end", { attempt, elapsedMs: Date.now() - promptStart });
+        }
+
+        const lines = result.trim().split("\n");
+        queryables = lines.map(line => {
+          const colonIdx = line.indexOf(":");
+          if (colonIdx === -1) return null;
+          const type = line.slice(0, colonIdx).trim();
+          if (type !== 'lex' && type !== 'vec' && type !== 'hyde') return null;
+          const text = line.slice(colonIdx + 1).trim();
+          if (!hasQueryTerm(text)) return null;
+          return { type: type as QueryType, text };
+        }).filter((q): q is Queryable => q !== null);
+
+        const contaminated = zhMarkers ? queryables.some(q => zhMarkers.test(q.text)) : false;
+
+        if (callId && zhMarkers) {
+          logQueryEvent(callId, contaminated ? "warn" : "debug", "llm.expandQuery.chineseGuard.attempt", {
+            attempt,
+            maxAttempts,
+            elapsedMs: Date.now() - attemptStart,
+            contaminated,
+          });
+        }
+
+        if (!contaminated) break;
+
+        if (attempt === maxAttempts) {
+          if (callId) {
+            logQueryEvent(callId, "warn", "llm.expandQuery.chineseGuard.exhausted", {
+              attempts: attempt,
+              totalElapsedMs: Date.now() - guardStart,
+            });
+          }
+          // Discard the still-contaminated result; fall through to the
+          // deterministic (non-LLM) fallback below instead of returning it.
+          queryables = [];
+        }
+      }
 
       // Filter out lex entries if not requested
       const filtered = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
@@ -1920,6 +2032,105 @@ export class LlamaCpp implements LLM {
 // ONNX Reranker (@huggingface/transformers 経由)
 // =============================================================================
 
+export interface OnnxRuntimeDiagnostics {
+  runtime: string;
+  availableBackends: string[];
+  effectiveProvider: string;
+  note?: string;
+}
+
+/**
+ * Resolve the ONNX device to pass to Transformers.js pipelines.
+ *
+ * Defaults to CPU. Benchmarked on Windows + Intel iGPU (DirectML): embed
+ * (Ruri v3 310M) ~25.8ms CPU vs ~271.4ms dml, rerank (japanese-reranker
+ * xsmall) ~19.9ms CPU vs ~127.0ms dml -- DirectML was 6-10x slower for
+ * these small models with single-short-text inputs. This matches known
+ * ONNX Runtime behavior: small batches / small tensors on an integrated
+ * GPU lose to CPU because the CPU<->GPU transfer overhead outweighs the
+ * compute savings (see https://github.com/microsoft/onnxruntime/discussions/14168,
+ * a DirectML maintainer describing the same pattern).
+ *
+ * Set QMD_ONNX_DEVICE=auto (values: auto|gpu|dml|cuda) to opt into
+ * Transformers.js's platform auto-detection (DirectML on Windows, CUDA on
+ * Linux x64 with a CUDA runtime installed, CPU elsewhere) -- useful on
+ * machines with a discrete GPU or with larger custom models, where GPU may
+ * actually win. QMD_FORCE_CPU (already used to disable llama.cpp GPU
+ * offload) always wins over QMD_ONNX_DEVICE, keeping the two GPU toggles
+ * consistent.
+ */
+export function resolveOnnxDevice(
+  optInValue = process.env.QMD_ONNX_DEVICE,
+  forceCpuValue = process.env.QMD_FORCE_CPU,
+): "auto" | undefined {
+  const forceCpu = forceCpuValue?.trim().toLowerCase() ?? "";
+  if (forceCpu && !["false", "off", "none", "disable", "disabled", "0"].includes(forceCpu)) {
+    return undefined;
+  }
+
+  const optIn = optInValue?.trim().toLowerCase() ?? "";
+  if (!optIn || ["cpu", "false", "off", "none", "disable", "disabled", "0"].includes(optIn)) {
+    return undefined;
+  }
+  if (["auto", "gpu", "dml", "cuda"].includes(optIn)) {
+    return "auto";
+  }
+
+  process.stderr.write(`QMD Warning: invalid QMD_ONNX_DEVICE="${optInValue}", defaulting to CPU.\n`);
+  return undefined;
+}
+
+/**
+ * Report the ONNX Runtime backends visible to the current Node process.
+ *
+ * effectiveProvider reflects what resolveOnnxDevice() + the actually
+ * bundled backends (per onnxruntime-node's listSupportedBackends()) will
+ * produce, not a platform guess, so doctor output stays correct if
+ * onnxruntime-node's per-platform EP support changes in a future version.
+ */
+export async function getOnnxRuntimeDiagnostics(): Promise<OnnxRuntimeDiagnostics> {
+  try {
+    const ort = await import("onnxruntime-node");
+    const backends = typeof ort.listSupportedBackends === "function"
+      ? ort.listSupportedBackends()
+      : [];
+    const device = resolveOnnxDevice();
+    const gpuBackend = backends.find(
+      (backend: { name: string; bundled: boolean }) => backend.bundled && backend.name !== "cpu",
+    );
+
+    let effectiveProvider: string;
+    let note: string;
+    if (device !== "auto") {
+      effectiveProvider = "cpu";
+      note = gpuBackend
+        ? `ONNX models run on CPU by default (benchmarked faster than ${gpuBackend.name} for small models/short inputs). Set QMD_ONNX_DEVICE=auto to opt into GPU.`
+        : "ONNX models run on CPU (no GPU execution provider bundled for this platform).";
+    } else if (gpuBackend) {
+      effectiveProvider = gpuBackend.name;
+      note = `QMD_ONNX_DEVICE=auto is set; ONNX Runtime prioritizes ${gpuBackend.name} on this platform and falls back to CPU per-op if unsupported.`;
+    } else {
+      effectiveProvider = "cpu";
+      note = "QMD_ONNX_DEVICE=auto is set, but no GPU execution provider is bundled for this platform; ONNX models run on CPU.";
+    }
+
+    return {
+      runtime: "onnxruntime-node" + (ort.env?.versions?.node ? " " + ort.env.versions.node : ""),
+      availableBackends: backends.map((backend: { name: string }) => backend.name),
+      effectiveProvider,
+      note,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      runtime: "unavailable",
+      availableBackends: [],
+      effectiveProvider: "unknown",
+      note: message,
+    };
+  }
+}
+
 export function isOnnxRerankModel(uri: string): boolean {
   return uri.startsWith("onnx:");
 }
@@ -1933,6 +2144,28 @@ export function parseOnnxRerankUri(uri: string): { modelId: string; modelFileNam
     modelId: without.slice(0, idx),
     modelFileName: without.slice(idx + 1),
   };
+}
+
+const ONNX_RERANK_MAX_TOKENS = 512;
+// Chunks are ~2,400 chars while the cross-encoder only sees 512 tokens.
+// Tokenizing the whole chunk and then truncating costs as much as inference
+// itself, so tokenize a character prefix first. 1,500 chars leaves margin past
+// the 512-token boundary for Japanese text (1,200 chars ≒ 512 tokens).
+export const ONNX_RERANK_PRECUT_CHARS = 1500;
+
+/**
+ * Encode a (query, document) pair for the ONNX cross-encoder.
+ * Tokenizes a character prefix of the document; if that prefix does not fill
+ * the token window, falls back to the full document so short-token-density
+ * texts produce the same input as before.
+ */
+export function encodeRerankPair(tokenizer: any, query: string, text: string, precutChars = ONNX_RERANK_PRECUT_CHARS): any {
+  const opts = { truncation: true, max_length: ONNX_RERANK_MAX_TOKENS, padding: true };
+  if (text.length > precutChars) {
+    const cut = tokenizer(query, { ...opts, text_pair: text.slice(0, precutChars) });
+    if (cut.input_ids.dims.at(-1) >= ONNX_RERANK_MAX_TOKENS) return cut;
+  }
+  return tokenizer(query, { ...opts, text_pair: text });
 }
 
 export class OnnxReranker {
@@ -1960,6 +2193,7 @@ export class OnnxReranker {
         AutoModelForSequenceClassification.from_pretrained(this.modelId, {
           dtype: "fp32",
           model_file_name: this.modelFileName,
+          device: resolveOnnxDevice(),
         }),
       ]);
       this.tokenizer = tok;
@@ -1978,12 +2212,7 @@ export class OnnxReranker {
     const scored: RerankDocumentResult[] = [];
 
     for (const [i, doc] of documents.entries()) {
-      const encoded = tokenizer(query, {
-        text_pair: doc.text,
-        truncation: true,
-        max_length: 512,
-        padding: true,
-      });
+      const encoded = encodeRerankPair(tokenizer, query, doc.text);
       const output = await model(encoded);
       const logits: number[] = Array.from(output.logits.data as Float32Array);
       // CrossEncoder: logits[0] が関連スコア（sigmoid で [0,1] に変換）
@@ -2056,7 +2285,7 @@ export class OnnxEmbedder {
       this.extractorPipeline = await (pipeline as (task: string, model: string, opts: Record<string, unknown>) => Promise<unknown>)(
         "feature-extraction",
         this.modelId,
-        { dtype: this.dtype },
+        { dtype: this.dtype, device: resolveOnnxDevice() },
       );
     })();
 

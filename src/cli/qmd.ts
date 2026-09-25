@@ -90,7 +90,7 @@ import {
   type ReindexResult,
   type ChunkStrategy,
 } from "../store.js";
-import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive, isOnnxModelUri } from "../llm.js";
+import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive, isOnnxModelUri, getOnnxRuntimeDiagnostics } from "../llm.js";
 import { getEmbeddingProvider, shouldUseLlamaCppTokenizerForEmbedding } from "../providers.js";
 import { newCallId, logQueryEvent, initLogger } from "../logger.js";
 import {
@@ -171,6 +171,8 @@ function getStore(): ReturnType<typeof createStore> {
         embedModel: modelsForLlm.embed,
         generateModel: modelsForLlm.generate,
         rerankModel: modelsForLlm.rerank,
+        expandChineseMarkers: config.queryExpansion?.contaminationMarkers,
+        expandMaxAttempts: config.queryExpansion?.maxAttempts,
       });
       setDefaultLlamaCpp(llm);
       store.llm = llm;
@@ -1004,7 +1006,7 @@ async function updateCollections(): Promise<void> {
   }
 
   // Check if any documents need embedding (show once at end)
-  const needsEmbedding = getHashesNeedingEmbedding(db);
+  const needsEmbedding = getHashesNeedingEmbedding(db, undefined, resolveEmbedModelForCli());
   const vectorTotal = (db.prepare(`SELECT COUNT(*) as count FROM content_vectors`).get() as { count: number }).count;
   const orphanedVectors = countOrphanedVectors(db);
   closeDb();
@@ -2050,7 +2052,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   const orphanedContent = cleanupOrphanedContent(db);
 
   // Check if vector index needs updating
-  const needsEmbedding = getHashesNeedingEmbedding(db);
+  const needsEmbedding = getHashesNeedingEmbedding(db, undefined, resolveEmbedModelForCli());
 
   progress.clear();
   console.log(`\nIndexed: ${indexed} new, ${updated} updated, ${unchanged} unchanged, ${removed} removed`);
@@ -4102,6 +4104,36 @@ function linuxCudaRuntimeDiagnostic(): string | null {
   return `NVIDIA driver libraries are visible, but CUDA user-space libraries are missing from loader paths (${missing.join(", ")})`;
 }
 
+async function runDoctorOnnxChecks(embedModel: string, rerankModel: string): Promise<void> {
+  const models = [
+    isOnnxModelUri(embedModel) ? "embedding: " + embedModel : null,
+    isOnnxModelUri(rerankModel) ? "reranker: " + rerankModel : null,
+  ].filter((model): model is string => model !== null);
+
+  if (models.length === 0) {
+    doctorCheck("ONNX Runtime", true, "not configured; active models use llama.cpp");
+    return;
+  }
+
+  const diagnostics = await getOnnxRuntimeDiagnostics();
+  const available = diagnostics.availableBackends.length > 0
+    ? diagnostics.availableBackends.join(", ")
+    : "none detected";
+  const details = [
+    models.join("; "),
+    "runtime: " + diagnostics.runtime,
+    "available backends: " + available,
+    "effective provider: " + diagnostics.effectiveProvider,
+  ];
+  if (diagnostics.note) details.push(diagnostics.note);
+
+  doctorCheck(
+    "ONNX Runtime",
+    diagnostics.runtime !== "unavailable",
+    details.join("; "),
+  );
+}
+
 async function runDoctorDeviceChecks(nextSteps: string[]): Promise<void> {
   const mode = configuredGpuModeLabel();
   doctorCheck("device mode", true, mode);
@@ -4236,6 +4268,7 @@ async function showDoctor(): Promise<void> {
   checkModelCache(activeModels, nextSteps);
 
   await runDoctorDeviceChecks(nextSteps);
+  await runDoctorOnnxChecks(embedModel, activeModels.rerank);
 
   try {
     const adoption = await maybeAdoptLegacyEmbeddingFingerprint(storeInstance, embedModel);

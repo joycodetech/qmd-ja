@@ -17,6 +17,7 @@ import { buildEditorUri, termLink, resolveEmbedModelForCli } from "../src/cli/qm
 import { openDatabase } from "../src/db.ts";
 import { DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI } from "../src/llm.ts";
 import { setConfigSource } from "../src/collections.ts";
+import { getEmbeddingFingerprint } from "../src/store.ts";
 
 // Test fixtures directory and database path
 let testDir: string;
@@ -326,6 +327,34 @@ describe("CLI Embed", () => {
       if (prev === undefined) delete process.env.QMD_EMBED_MODEL;
       else process.env.QMD_EMBED_MODEL = prev;
     }
+  });
+
+  test("update counts pending embeddings against the active embed model, not the default", async () => {
+    const activeModel = "hf:env/embed-model.gguf";
+    // The CLI pins the resolved embed model into config on first use, so every
+    // command in this test must see the same QMD_EMBED_MODEL.
+    const env = { QMD_EMBED_MODEL: activeModel };
+    await runQmd(["collection", "add", "."], { env });
+
+    // Vectors exist only for the active (non-default) model, as in an ONNX setup.
+    const db = openDatabase(testDbPath);
+    try {
+      const hashes = db.prepare(`SELECT DISTINCT hash FROM documents WHERE active = 1`).all() as { hash: string }[];
+      expect(hashes.length).toBeGreaterThan(0);
+      const insert = db.prepare(
+        `INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embed_fingerprint, total_chunks, embedded_at)
+         VALUES (?, 0, 0, ?, ?, 1, ?)`
+      );
+      for (const { hash } of hashes) {
+        insert.run(hash, activeModel, getEmbeddingFingerprint(activeModel), new Date().toISOString());
+      }
+    } finally {
+      db.close();
+    }
+
+    const { stdout, exitCode } = await runQmd(["update"], { env });
+    expect(exitCode).toBe(0);
+    expect(stdout).not.toContain("need vectors");
   });
 
   test("falls back to the default embed model when QMD_EMBED_MODEL is unset", () => {
