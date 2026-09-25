@@ -1435,6 +1435,9 @@ describe("LlamaCpp generate sequence dispose (node-llama-cpp 3.20)", () => {
 });
 
 describe("LlamaCpp expandQuery contamination guard", () => {
+  // vi.mocked() is not available under bun's vitest shim; cast instead.
+  const logMock = logQueryEvent as unknown as ReturnType<typeof vi.fn>;
+
   function createHarness(
     config: ConstructorParameters<typeof LlamaCpp>[0],
     generatedResults: string[],
@@ -1486,7 +1489,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
     const previousMaxAttempts = process.env.QMD_EXPAND_MAX_ATTEMPTS;
     delete process.env.QMD_EXPAND_ZH_MARKERS;
     delete process.env.QMD_EXPAND_MAX_ATTEMPTS;
-    vi.mocked(logQueryEvent).mockClear();
+    logMock.mockClear();
 
     const harness = createHarness({}, ["vec: test query 这"]);
     try {
@@ -1494,7 +1497,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
 
       expect(result).toEqual([{ type: "vec", text: "test query 这" }]);
       expect(harness.createContext).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(logQueryEvent).mock.calls.some(([, , event]) =>
+      expect(logMock.mock.calls.some(([, , event]) =>
         event.startsWith("llm.expandQuery.chineseGuard."),
       )).toBe(false);
     } finally {
@@ -1507,7 +1510,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
   });
 
   test("with markers configured, a clean first result does not retry", async () => {
-    vi.mocked(logQueryEvent).mockClear();
+    logMock.mockClear();
     const harness = createHarness(
       { expandChineseMarkers: "[这]", expandMaxAttempts: 3 },
       ["vec: test query clean"],
@@ -1517,7 +1520,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
 
       expect(result).toEqual([{ type: "vec", text: "test query clean" }]);
       expect(harness.createContext).toHaveBeenCalledTimes(1);
-      const attempts = vi.mocked(logQueryEvent).mock.calls.filter(([, , event]) =>
+      const attempts = logMock.mock.calls.filter(([, , event]) =>
         event === "llm.expandQuery.chineseGuard.attempt",
       );
       expect(attempts).toHaveLength(1);
@@ -1528,7 +1531,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
   });
 
   test("retries a contaminated result and returns the clean second result", async () => {
-    vi.mocked(logQueryEvent).mockClear();
+    logMock.mockClear();
     const harness = createHarness(
       { expandChineseMarkers: "[这]", expandMaxAttempts: 2 },
       ["vec: test query 这", "vec: test query clean"],
@@ -1540,7 +1543,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
       expect(harness.createContext).toHaveBeenCalledTimes(2);
       expect(harness.sequences.every(sequence => sequence.dispose.mock.calls.length === 1)).toBe(true);
       expect(harness.contexts.every(context => context.dispose.mock.calls.length === 1)).toBe(true);
-      const attempts = vi.mocked(logQueryEvent).mock.calls.filter(([, , event]) =>
+      const attempts = logMock.mock.calls.filter(([, , event]) =>
         event === "llm.expandQuery.chineseGuard.attempt",
       );
       expect(attempts).toHaveLength(2);
@@ -1551,7 +1554,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
   });
 
   test("falls back deterministically and logs exhaustion when every attempt is contaminated", async () => {
-    vi.mocked(logQueryEvent).mockClear();
+    logMock.mockClear();
     const harness = createHarness(
       { expandChineseMarkers: "[这]", expandMaxAttempts: 2 },
       ["vec: test query 这", "hyde: test query 这"],
@@ -1565,7 +1568,7 @@ describe("LlamaCpp expandQuery contamination guard", () => {
         { type: "vec", text: "test query" },
       ]);
       expect(harness.createContext).toHaveBeenCalledTimes(2);
-      const exhausted = vi.mocked(logQueryEvent).mock.calls.filter(([, , event]) =>
+      const exhausted = logMock.mock.calls.filter(([, , event]) =>
         event === "llm.expandQuery.chineseGuard.exhausted",
       );
       expect(exhausted).toHaveLength(1);
