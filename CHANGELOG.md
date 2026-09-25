@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.3-ja.2] - 2026-09-25
+
 Faster ONNX reranking, a fix for the misleading `qmd update` embedding count, and opt-in query-expansion and GPU controls.
 
 ### Performance
