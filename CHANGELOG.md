@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+Faster ONNX reranking, a fix for the misleading `qmd update` embedding count, and opt-in query-expansion and GPU controls.
+
+### Performance
+
+- ONNX reranker: tokenize only the first 1,500 characters of each candidate before truncating to 512 tokens. Model input is unchanged (30 real queries / 594 candidates: identical scores and rank order). MCP latency for `candidateLimit` 20 drops from about 1.48s to 1.22s, and for 40 from about 3.8s to 2.5s.
+
+### Fixes
+
+- `qmd update` no longer reports every document as needing embeddings when a non-default (e.g. ONNX) embed model is configured. It counted against the default GGUF model, so a 1,773-document index showed "1,773 need vectors" while `qmd doctor` correctly showed 41.
+
+### Query expansion
+
+- Add an opt-in retry guard for simplified-Chinese contamination in expanded queries. Configure `queryExpansion.contaminationMarkers` / `maxAttempts` in `.qmd/index.yml`, or `QMD_EXPAND_ZH_MARKERS` / `QMD_EXPAND_MAX_ATTEMPTS`. Disabled unless configured.
+- Change the expansion grammar to fixed line counts and a 10-280 character hyde bound. This applies to everyone using auto-expansion (`query`): in an 8-query check, a few queries returned one fewer `vec` line than before.
+
+### ONNX
+
+- `qmd doctor` reports the ONNX execution provider used for embedding and reranking.
+- Add `QMD_ONNX_DEVICE=auto` to opt into GPU (DirectML on Windows, CUDA on Linux x64). CPU remains the default: on a small embed/rerank model, DirectML on an integrated GPU was 6-10x slower than CPU.
+
 ## [2.8.3-ja.1] - 2026-09-03
 
 Sync with upstream `tobi/qmd` v2.8.3 (previous sync: 2026-06-29, v2.6.3-ja.1).
