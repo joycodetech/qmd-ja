@@ -30,10 +30,13 @@ jobs:
           CI: true
           LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
 
+      # Trusted Publishing (OIDC): NPM_TOKEN不要。npm 11.5.1以上が必要
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - run: npm --version
 
       - run: npm run build
       - name: Publish to npm
@@ -44,8 +47,6 @@ jobs:
           else
             npm publish --provenance --access public --tag latest
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Extract release notes
         id: notes
